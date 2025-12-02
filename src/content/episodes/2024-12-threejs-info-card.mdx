@@ -3,7 +3,7 @@ title: "Three.js 3D场景自定义标签窗口：从场景初始化到高清跟�
 date: "2024-12-02"
 episode: "E02"
 cover: "/covers/threejs-info-card.jpg"
-description: "一个完整的 Three.js Demo：在 3D 隧道场景中实现高清、跟随相机的人员信息卡，涵盖场景初始化、交互检测、画布渲染优化等核心技术。"
+description: "一个完整的 Three.js Demo：在 3D 场景中实现高清、跟随相机的信息卡，涵盖场景初始化、交互检测、画布渲染优化等核心技术。"
 tags:
   - three.js
   - 3d
@@ -14,14 +14,14 @@ tags:
 ## 大纲
 
 - 场景初始化：Renderer/Camera/Controls 的骨架搭建
-- 工人交互链路：命中检测到信息卡弹出
+- 模型点击事件交互链路：命中检测到信息卡弹出
 - 信息卡核心实现：高清纹理、屏幕空间缩放、水平跟随
 - 动态宽度与竖排布局：按内容测量生成画布
 - 踩坑笔记：清晰度、对齐、缩放
 
 ## 背景
 
-在隧道三维场景中点击人员时,需要弹出一张高清、可跟随相机的"信息卡"。这个功能看似简单,但尺寸、清晰度、跟随逻辑等细节容易踩坑。本文将从零开始搭建一个完整的 Demo,展示如何用 Three.js 实现这个功能。
+在3D场景中点击某个模型时,需要弹出一张高清、可跟随相机的"信息卡"。这个功能看似简单,但尺寸、清晰度、跟随逻辑等细节容易踩坑。本文将从零开始搭建一个完整的 Demo,展示如何用 Three.js 实现这个功能。
 
 ---
 
@@ -480,7 +480,7 @@ private drawCardContent(
 - ❌ **错误写法**：`lookAt(camera.position)` 直接朝向,俯仰时卡片歪斜
 - ✅ **正确写法**：锁定 Y 轴,只绕水平面转向
 
-### 宽度不自适应
+### 宽度不自适应(后端字段内容长度不确定时可以考虑使用)
 - ❌ **错误写法**：写死宽度 `width = 200`
 - ✅ **正确写法**：用 `measureText` 测量内容后动态计算
 
@@ -495,7 +495,7 @@ import { SceneManager } from './scene/SceneManager';
 const container = document.getElementById('canvas-container')!;
 const sceneManager = new SceneManager(container);
 
-// 加载工人模型和数据
+// 获取数据代码
 // ...
 
 // 清理
@@ -504,7 +504,7 @@ window.addEventListener('beforeunload', () => {
 });
 ```
 
-至此,一个高清、随相机水平跟随、宽度自适应的人员信息卡 Demo 就完成了。核心要点：
+至此,一个高清、随相机水平跟随、宽度自适应的信息卡 Demo 就完成了。核心要点：
 
 1. **场景架构**：`SceneManager` 统一管理渲染循环,每帧传递 camera 给信息卡
 2. **交互检测**：`Raycaster` + NDC 坐标转换实现精准点击

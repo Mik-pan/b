@@ -22,7 +22,7 @@ const extractText = (node: React.ReactNode): string => {
   return "";
 };
 
-const MAX_HEIGHT = 320;
+const MAX_HEIGHT = 180;
 
 export function CodeBlock({ children, className, ...rest }: PreProps) {
   const [copied, setCopied] = useState(false);
