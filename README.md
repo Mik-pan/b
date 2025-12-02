@@ -34,3 +34,6 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### 本地评论（自有数据库）
+- 已使用 SQLite（prisma/dev.db），Prisma 模型包含 Comment。
+- 文章页内置评论表单，无需外部服务；防刷：同 session/IP 30 秒一次，内容长度 3~2000 字。

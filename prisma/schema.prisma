@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Episode {
+  slug       String   @id
+  title      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  views      View[]
+  likes      Like[]
+  comments   Comment[]
+}
+
+model View {
+  id        Int      @id @default(autoincrement())
+  slug      String
+  sessionId String
+  ipHash    String?
+  createdAt DateTime @default(now())
+  episode   Episode  @relation(fields: [slug], references: [slug], onDelete: Cascade)
+
+  @@unique([slug, sessionId])
+  @@unique([slug, ipHash])
+  @@index([slug])
+}
+
+model Like {
+  id        Int      @id @default(autoincrement())
+  slug      String
+  sessionId String
+  ipHash    String?
+  createdAt DateTime @default(now())
+  episode   Episode  @relation(fields: [slug], references: [slug], onDelete: Cascade)
+
+  @@unique([slug, sessionId])
+  @@unique([slug, ipHash])
+  @@index([slug])
+}
+
+model Comment {
+  id        Int      @id @default(autoincrement())
+  slug      String
+  sessionId String
+  ipHash    String?
+  content   String
+  parentId  Int?
+  createdAt DateTime @default(now())
+  episode   Episode  @relation(fields: [slug], references: [slug], onDelete: Cascade)
+  parent    Comment? @relation("CommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[] @relation("CommentThread")
+
+  @@index([slug])
+  @@index([createdAt])
+}

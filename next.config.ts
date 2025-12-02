@@ -1,7 +1,13 @@
+import createMDX from "@next/mdx";
 import type { NextConfig } from "next";
 
+const withMDX = createMDX();
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  pageExtensions: ["ts", "tsx", "mdx"],
+  turbopack: {
+    root: __dirname,
+  },
 };
 
-export default nextConfig;
+export default withMDX(nextConfig);

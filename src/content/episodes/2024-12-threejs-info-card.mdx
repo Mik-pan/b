@@ -1,0 +1,516 @@
+---
+title: "Three.js 3D场景自定义标签窗口：从场景初始化到高清跟随相机的实现"
+date: "2024-12-02"
+episode: "E02"
+cover: "/covers/threejs-info-card.jpg"
+description: "一个完整的 Three.js Demo：在 3D 隧道场景中实现高清、跟随相机的人员信息卡，涵盖场景初始化、交互检测、画布渲染优化等核心技术。"
+tags:
+  - three.js
+  - 3d
+  - canvas
+  - webgl
+---
+
+## 大纲
+
+- 场景初始化：Renderer/Camera/Controls 的骨架搭建
+- 工人交互链路：命中检测到信息卡弹出
+- 信息卡核心实现：高清纹理、屏幕空间缩放、水平跟随
+- 动态宽度与竖排布局：按内容测量生成画布
+- 踩坑笔记：清晰度、对齐、缩放
+
+## 背景
+
+在隧道三维场景中点击人员时,需要弹出一张高清、可跟随相机的"信息卡"。这个功能看似简单,但尺寸、清晰度、跟随逻辑等细节容易踩坑。本文将从零开始搭建一个完整的 Demo,展示如何用 Three.js 实现这个功能。
+
+---
+
+## 1. 场景初始化骨架
+
+首先创建场景管理器,负责初始化渲染器、相机和控制器：
+
+**文件：`src/scene/SceneManager.ts`**
+
+```ts
+import * as THREE from 'three';
+import { RendererManager } from './RendererManager';
+import { CameraManager } from './CameraManager';
+import { ControlsManager } from './ControlsManager';
+import { ModelManager } from './ModelManager';
+
+export class SceneManager {
+  private scene: THREE.Scene;
+  private rendererManager: RendererManager;
+  private cameraManager: CameraManager;
+  private controlsManager: ControlsManager;
+  private modelManager: ModelManager;
+  private animationFrameId: number | null = null;
+
+  constructor(container: HTMLElement) {
+    // 初始化核心组件
+    this.scene = new THREE.Scene();
+    this.rendererManager = new RendererManager(container);
+    this.cameraManager = new CameraManager(container);
+    this.controlsManager = new ControlsManager(
+      this.cameraManager.instance, 
+      this.rendererManager.instance.domElement
+    );
+    this.modelManager = new ModelManager(
+      this.scene,
+      this.rendererManager.instance,
+      this.cameraManager.instance
+    );
+
+    // 启动动画循环
+    this.animate();
+  }
+
+  private animate = () => {
+    this.controlsManager.update();
+    // 每帧传入相机，用于信息卡的 billboard 更新
+    this.modelManager.update(this.cameraManager.instance);
+    this.rendererManager.instance.render(
+      this.scene, 
+      this.cameraManager.instance
+    );
+    this.animationFrameId = requestAnimationFrame(this.animate);
+  };
+
+  dispose() {
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+    }
+    this.modelManager.dispose();
+    this.controlsManager.dispose();
+    this.rendererManager.dispose();
+  }
+}
+```
+
+**要点**：让 `ModelManager.update(camera)` 每帧拿到相机引用,后续信息卡的屏幕空间缩放和朝向都依赖它。
+
+---
+
+## 2. 交互链路：命中 → 显示卡片
+
+在 `ModelManager` 中集成交互管理器和信息卡管理器：
+
+**文件：`src/scene/ModelManager.ts`**
+
+```ts
+import * as THREE from 'three';
+import { WorkerInteractionManager } from './WorkerInteractionManager';
+import { WorkerInfoCardManager } from './WorkerInfoCardManager';
+
+export class ModelManager {
+  private workerInteractionManager: WorkerInteractionManager;
+  private workerInfoCardManager: WorkerInfoCardManager;
+
+  constructor(
+    scene: THREE.Scene,
+    renderer: THREE.WebGLRenderer,
+    camera: THREE.PerspectiveCamera
+  ) {
+    // 初始化交互和信息卡管理器
+    this.workerInteractionManager = new WorkerInteractionManager();
+    this.workerInfoCardManager = new WorkerInfoCardManager(scene);
+
+    // 设置上下文
+    this.workerInteractionManager.setContext(
+      camera, 
+      renderer, 
+      renderer.domElement
+    );
+    this.workerInfoCardManager.setContext(camera, renderer);
+
+    // 点击命中后展示信息卡
+    this.workerInteractionManager.setOnSelect((personId, object, details) => {
+      if (!personId || !object) {
+        this.workerInfoCardManager.hide();
+        return;
+      }
+
+      this.workerInfoCardManager.show(personId, object, {
+        personId: details?.personId,
+        personName: details?.personName,
+        distance: details?.distance ?? null,
+        voltage: details?.voltage ?? null,
+        rssi: details?.rssi ?? null,
+        isSos: details?.isSos ?? false,
+      });
+    });
+  }
+
+  update(camera: THREE.Camera) {
+    // 更新信息卡的 billboard 效果
+    this.workerInfoCardManager.updateBillboard(camera);
+  }
+
+  dispose() {
+    this.workerInteractionManager.dispose();
+    this.workerInfoCardManager.dispose();
+  }
+}
+```
+
+`WorkerInteractionManager` 内部使用 `THREE.Raycaster` 进行点击检测：
+
+**文件：`src/scene/WorkerInteractionManager.ts`**
+
+```ts
+import * as THREE from 'three';
+
+export class WorkerInteractionManager {
+  private raycaster = new THREE.Raycaster();
+  private pointer = new THREE.Vector2();
+  private camera!: THREE.Camera;
+  private renderer!: THREE.WebGLRenderer;
+  private onSelectCallback?: (
+    personId: string, 
+    object: THREE.Object3D, 
+    details: any
+  ) => void;
+
+  setContext(
+    camera: THREE.Camera, 
+    renderer: THREE.WebGLRenderer, 
+    domElement: HTMLElement
+  ) {
+    this.camera = camera;
+    this.renderer = renderer;
+    
+    domElement.addEventListener('pointerup', this.handlePointerUp);
+  }
+
+  setOnSelect(callback: typeof this.onSelectCallback) {
+    this.onSelectCallback = callback;
+  }
+
+  private handlePointerUp = (event: PointerEvent) => {
+    // 更新 pointer 为 NDC 坐标
+    this.updatePointer(event);
+    
+    // 射线检测
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    // 实际项目中这里会对工人模型进行检测
+    // const intersects = this.raycaster.intersectObjects(workerObjects, true);
+    
+    // 示例：假设检测到了工人
+    // if (intersects.length > 0) {
+    //   this.onSelectCallback?.('worker-001', intersects[0].object, details);
+    // }
+  };
+
+  private updatePointer(event: PointerEvent) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    // 转换为 NDC 坐标 (-1 到 1)
+    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+  }
+
+  dispose() {
+    // 清理事件监听
+  }
+}
+```
+
+**核心**：将 DOM 坐标转换为归一化设备坐标(NDC),范围为 [-1, 1],用于射线检测。
+
+---
+
+## 3. 信息卡核心：高清纹理 + 屏幕空间缩放 + 水平跟随
+
+**文件：`src/scene/WorkerInfoCardManager.ts`**
+
+### 3.1 绘制高清纹理
+
+根据内容测量宽度,按设备像素比放大画布,关闭 mipmap 并开启各向异性,保证清晰：
+
+```ts
+private createCardTexture(details: PersonDetails): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d')!;
+
+  // 测量并计算逻辑尺寸
+  const { logicalWidth, logicalHeight } = this.measureCardSize(details);
+
+  // 按设备像素比放大画布
+  const textureScale = this.getTextureScale(); // Math.min(devicePixelRatio, 3)
+  canvas.width = Math.round(logicalWidth * textureScale);
+  canvas.height = Math.round(logicalHeight * textureScale);
+  ctx.scale(textureScale, textureScale);
+
+  // 绘制内容
+  this.drawCardContent(ctx, details, logicalWidth, logicalHeight);
+
+  // 创建纹理并优化质量
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.generateMipmaps = false;           // 禁用 mipmap
+  texture.minFilter = THREE.LinearFilter;     // 线性过滤
+  texture.magFilter = THREE.LinearFilter;
+  texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+  texture.needsUpdate = true;
+
+  return texture;
+}
+
+private getTextureScale(): number {
+  const dpr = this.renderer.getPixelRatio();
+  return Math.min(dpr, 3); // 最高 3 倍
+}
+```
+
+**关键点**：
+1. 画布尺寸要按 `devicePixelRatio` 放大
+2. 禁用 mipmap 避免模糊
+3. 使用线性过滤 + 最大各向异性
+4. 设置 sRGB 色彩空间
+
+### 3.2 屏幕空间缩放 + 父级缩放抵消
+
+让信息卡在屏幕上保持恒定大小,不受相机距离影响：
+
+```ts
+private updateCardScale(camera: THREE.PerspectiveCamera, cardGroup: THREE.Group) {
+  // 计算卡片到相机的距离
+  const worldPos = new THREE.Vector3();
+  cardGroup.getWorldPosition(worldPos);
+  const distance = camera.position.distanceTo(worldPos);
+
+  // 计算屏幕空间缩放
+  const pixelHeight = 200; // 期望的屏幕像素高度
+  const scale = this.computeScale(distance, pixelHeight, camera);
+
+  // 抵消父节点的世界缩放
+  const parentScale = this.getParentWorldScale(cardGroup);
+  const adjustedScale = scale / parentScale;
+
+  cardGroup.scale.setScalar(adjustedScale);
+}
+
+private computeScale(
+  distance: number,
+  pixelHeight: number,
+  camera: THREE.PerspectiveCamera
+): number {
+  // 透视相机：使用视锥公式
+  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const viewportHeight = this.renderer.domElement.clientHeight;
+  const worldHeight = 2 * Math.tan(vFov / 2) * distance;
+  const pixelToWorld = worldHeight / viewportHeight;
+  return pixelHeight * pixelToWorld;
+}
+
+private getParentWorldScale(object: THREE.Object3D): number {
+  const worldScale = new THREE.Vector3();
+  object.parent?.getWorldScale(worldScale);
+  // 取 XYZ 平均值
+  return (worldScale.x + worldScale.y + worldScale.z) / 3;
+}
+```
+
+**核心公式**：
+- 视口世界高度 = `2 * tan(fov/2) * distance`
+- 像素到世界单位转换 = `worldHeight / viewportHeight`
+- 最终缩放 = `pixelHeight * pixelToWorld / parentScale`
+
+### 3.3 水平跟随相机（不随俯仰）
+
+只让卡片绕垂直轴转向相机,保持横平：
+
+```ts
+updateBillboard(camera: THREE.Camera) {
+  if (!this.cardGroup.visible) return;
+
+  // 获取卡片世界位置
+  const worldPos = new THREE.Vector3();
+  this.cardGroup.getWorldPosition(worldPos);
+
+  // 创建目标点：锁定 Y 轴高度
+  const target = new THREE.Vector3().copy(camera.position);
+  target.y = worldPos.y;
+
+  // 防止 lookAt 异常（当相机正好在卡片上方时）
+  if (target.distanceToSquared(worldPos) < 1e-6) {
+    target.copy(camera.position);
+  }
+
+  this.cardGroup.lookAt(target);
+
+  // 更新缩放
+  this.updateCardScale(camera as THREE.PerspectiveCamera, this.cardGroup);
+}
+```
+
+**要点**：锁定目标点的 Y 坐标与卡片相同,实现只在水平面旋转。
+
+---
+
+## 4. 动态宽度与竖排布局
+
+不写死宽度,而是根据内容动态测量：
+
+```ts
+private measureCardSize(details: PersonDetails): {
+  logicalWidth: number;
+  logicalHeight: number;
+} {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d')!;
+  
+  // 设置字体用于测量
+  ctx.font = 'bold 18px Arial';
+  const titleWidth = ctx.measureText(details.personName || '-').width;
+
+  ctx.font = '14px Arial';
+  const infoLines = [
+    { label: 'ID', value: this.truncate(details.personId ?? '-', 10) },
+    { label: '距离', value: details.distance != null 
+        ? `${details.distance.toFixed(2)} m` : '--' },
+    { label: '电压', value: details.voltage != null 
+        ? `${details.voltage.toFixed(1)} V` : '--' },
+    { label: '信号', value: details.rssi != null 
+        ? `${details.rssi.toFixed(0)} dBm` : '--' },
+  ];
+
+  let maxContentWidth = titleWidth;
+
+  // 计算每行信息的宽度
+  infoLines.forEach(line => {
+    const labelWidth = ctx.measureText(`${line.label}:`).width;
+    const valueWidth = ctx.measureText(line.value).width;
+    const lineWidth = labelWidth + 8 + valueWidth; // 8px 间距
+    maxContentWidth = Math.max(maxContentWidth, lineWidth);
+  });
+
+  // SOS 徽章宽度
+  if (details.isSos) {
+    ctx.font = 'bold 12px Arial';
+    const badgeWidth = ctx.measureText('SOS').width + 16;
+    maxContentWidth = Math.max(maxContentWidth, badgeWidth);
+  }
+
+  const padding = 16;
+  const lineHeight = 20;
+  const titleHeight = 24;
+
+  const logicalWidth = maxContentWidth + padding * 2;
+  const logicalHeight = titleHeight + infoLines.length * lineHeight 
+    + (details.isSos ? 24 : 0) + padding * 2;
+
+  return { logicalWidth, logicalHeight };
+}
+
+private truncate(text: string, maxLength: number): string {
+  return text.length > maxLength 
+    ? text.substring(0, maxLength) + '...' 
+    : text;
+}
+```
+
+绘制时字段竖排,每行"标签: 值"：
+
+```ts
+private drawCardContent(
+  ctx: CanvasRenderingContext2D,
+  details: PersonDetails,
+  width: number,
+  height: number
+) {
+  // 背景
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  ctx.fillRect(0, 0, width, height);
+
+  const padding = 16;
+  let y = padding;
+
+  // 标题
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 18px Arial';
+  ctx.fillText(details.personName || '-', padding, y + 18);
+  y += 30;
+
+  // 信息行
+  ctx.font = '14px Arial';
+  const lines = [
+    { label: 'ID', value: this.truncate(details.personId ?? '-', 10) },
+    { label: '距离', value: details.distance != null 
+        ? `${details.distance.toFixed(2)} m` : '--' },
+    { label: '电压', value: details.voltage != null 
+        ? `${details.voltage.toFixed(1)} V` : '--' },
+    { label: '信号', value: details.rssi != null 
+        ? `${details.rssi.toFixed(0)} dBm` : '--' },
+  ];
+
+  lines.forEach(line => {
+    ctx.fillStyle = '#999';
+    ctx.fillText(`${line.label}:`, padding, y + 14);
+    ctx.fillStyle = '#fff';
+    const labelWidth = ctx.measureText(`${line.label}:`).width;
+    ctx.fillText(line.value, padding + labelWidth + 8, y + 14);
+    y += 20;
+  });
+
+  // SOS 徽章
+  if (details.isSos) {
+    y += 8;
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(padding, y, 50, 20);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px Arial';
+    ctx.fillText('SOS', padding + 8, y + 14);
+  }
+}
+```
+
+---
+
+## 5. 踩坑与对照
+
+### 模糊问题
+- ❌ **错误写法**：直接用逻辑尺寸创建画布,默认 mipmap,放大后模糊
+- ✅ **正确写法**：按 `devicePixelRatio` 放大画布,禁用 mipmap,使用线性过滤 + 各向异性
+
+### 卡片大小不对
+- ❌ **错误写法**：忽略父节点缩放,导致卡片随工人模型一起被缩小
+- ✅ **正确写法**：`adjustedScale = scale / parentWorldScale` 抵消父级缩放
+
+### 跟随方向不对
+- ❌ **错误写法**：`lookAt(camera.position)` 直接朝向,俯仰时卡片歪斜
+- ✅ **正确写法**：锁定 Y 轴,只绕水平面转向
+
+### 宽度不自适应
+- ❌ **错误写法**：写死宽度 `width = 200`
+- ✅ **正确写法**：用 `measureText` 测量内容后动态计算
+
+---
+
+## 6. 完整使用示例
+
+```ts
+// main.ts
+import { SceneManager } from './scene/SceneManager';
+
+const container = document.getElementById('canvas-container')!;
+const sceneManager = new SceneManager(container);
+
+// 加载工人模型和数据
+// ...
+
+// 清理
+window.addEventListener('beforeunload', () => {
+  sceneManager.dispose();
+});
+```
+
+至此,一个高清、随相机水平跟随、宽度自适应的人员信息卡 Demo 就完成了。核心要点：
+
+1. **场景架构**：`SceneManager` 统一管理渲染循环,每帧传递 camera 给信息卡
+2. **交互检测**：`Raycaster` + NDC 坐标转换实现精准点击
+3. **高清渲染**：画布按 DPR 放大 + 禁用 mipmap + 各向异性过滤
+4. **屏幕缩放**：视锥公式计算 + 抵消父节点缩放
+5. **水平跟随**：锁定 Y 轴的 `lookAt`
+6. **动态布局**：`measureText` 测量内容宽度
+
+希望这个完整的从零实现能帮助你快速搭建类似的 Three.js 交互功能。下周见。***

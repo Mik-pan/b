@@ -1,0 +1,71 @@
+---
+title: "开场：博客日志起步"
+date: "2024-12-01"
+episode: "E01"
+cover: "/covers/hello-world.jpg"
+description: "第一篇正式日志，记录博客建设的动机、信息架构、内容规划与发布流程。"
+tags:
+  - intro
+  - setup
+---
+
+## 为什么要写这篇开场
+
+过去的输出散落在群聊、便签和零碎的 GitHub Gist 里，查找困难、也缺乏持续维护。现在选择把所有长文集中到一个独立站点，并且让它贴近工程化：用 MDX 写内容、用数据库记录互动，用 Server Actions 完成交互逻辑。这样既能验证技术栈，又能把知识沉淀为可检索的档案。
+
+## 信息架构与内容形态
+
+- **页面层**：首页列表 + 详情页，未来补充归档与项目页。列表展示标题、日期、标签、浏览/点赞计数，详情页展示正文、评论，并保持正文区域独立滚动。
+- **内容层**：MDX 存在 `src/content/episodes`，frontmatter 统一包含 `title / date / episode / cover / description / tags`，slug 取文件名。阅读时长由字数估算，方便在详情页显示。
+- **互动层**：浏览量与点赞基于 SQLite + Prisma，匿名 session + IP hash 防刷；评论落在本地数据库，支持长度校验（3~2000 字）与生产环境 30 秒限频。
+- **渲染层**：rehype-pretty-code + 自定义 CodeBlock 组件提供高亮与复制按钮；代码背景、文字对比度已调整，深色背景下仍清晰。
+
+## 架构实现细节
+
+1. **MDX 处理**：使用 `@next/mdx` + `rehype-pretty-code`，并在 `getEpisodeBySlug` 时通过 `compileMDX` 编译，传入自定义 `CodeBlock` 组件实现复制按钮和统一样式。slug 通过文件名推导，frontmatter 解析基于 `gray-matter`。
+2. **数据与防刷**：
+   - Prisma schema：`Episode`、`View`、`Like`、`Comment`。`View/Like` 唯一键包含 `slug+sessionId` 与 `slug+ipHash`，`Comment` 关联 `Episode` 并支持父子关系字段（目前未开放多级回复）。
+   - 会话：Server Action 内用 `cookies()` 写 `sid`，并 hash `x-forwarded-for` 等头获取 `ipHash`。生产环境点赞/浏览/评论都按 session+IP 去重。
+3. **Server Actions**：
+   - `recordViewAction`/`toggleLikeAction`：保证 episode 存在后再 upsert view/like，避免重复计数。
+   - `createCommentAction`：校验长度，生产限频 30 秒（本地无限制），然后写入 Comment 表，最后 `revalidatePath`。
+4. **页面/数据流**：
+   - 首页 `getEngagementTotals` 分组统计 view/like，在列表上直接显示。
+   - 详情页强制动态渲染（`dynamic = "force-dynamic"`），读取文章、互动数据，客户端再自动记录浏览；评论组件通过 Server Action 获取/提交数据。
+5. **布局与滚动**：`episode-main` 全宽且可滚动，滚动条自定义为黑描边+hover 变 accent；左侧 Sidebar 固定，正文区域独立滚动，避免导航抖动。
+
+## 开发与发布的期望节奏
+
+1. **周更节奏**：每周至少一篇长文，主题聚焦在工程实践、系统设计或阅读笔记，避免“碎片化转发”。  
+2. **变更可追踪**：每次内容更新走 Git 记录，确保任何改动都有 diff；数据库迁移留存，方便回溯。  
+3. **自动化检视**：本地 `npm run build` 验证 MDX 渲染、类型校验与 Prisma schema 是否一致；未来补充链接检查脚本。  
+
+## 写作方式与标准
+
+- **先大纲再成文**：先列段落与要点，再填充细节，减少“想到哪写到哪”的混乱。
+- **示例优先**：尽量配合代码片段或命令行示例，确保读者能直接复制运行。
+- **上下文可追**：引用外链注明来源，涉及配置或架构图则在正文内简要交代背景。
+
+下面这段示例代码展示当前项目中获取文章内容与交互数据的方式，背后依赖 `compileMDX` 与 Prisma：
+
+```ts
+import { getEpisodeBySlug } from "@/lib/content";
+import { getEngagementForRequest } from "@/lib/engagement";
+
+export async function loadPage(slug: string) {
+  const { meta, content } = await getEpisodeBySlug(slug);
+  const engagement = await getEngagementForRequest(slug, meta.title);
+  return { meta, content, engagement };
+}
+```
+
+## 近期要完成的事情
+
+- **UI 打磨**：列表与详情页排版成型，但还缺少更强的“频道感”，后续会调整色块与分隔线，增加更多“硬朗”装饰。  
+- **RSS 与 sitemap**：目前 `/rss.xml` 是占位，需接入真实内容数据源，自动更新。  
+- **部署脚本**：准备 pm2 与 Nginx 配置，写一个可重复的 `deploy.sh`，让上线与迁移步骤标准化。  
+- **评论体验**：当前是简易表单 + 本地存储，后续补充引用、层级与@提示，并考虑反垃圾策略。  
+
+## 结语
+
+把第一篇命名为“博客日志起步”，是为了提醒自己：这里既是内容输出的起点，也是技术栈演进的记录点。每篇文章都要做到可复现、可迭代、可回溯。如果你看到这里，欢迎留言或点赞，帮助我发现问题、不断改进。下周见。***
