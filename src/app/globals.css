@@ -564,6 +564,22 @@ ul {
 .code-block pre {
   margin: 0;
   background: transparent;
+  position: relative;
+  transition: max-height 0.3s ease;
+}
+
+/* Fade out effect when collapsed */
+.code-block[data-collapsed="true"]::after {
+  content: '';
+  position: absolute;
+  bottom: 48px;
+  /* height of expand button */
+  left: 0;
+  right: 0;
+  height: 80px;
+  background: linear-gradient(to bottom, transparent, #282c34);
+  pointer-events: none;
+  z-index: 1;
 }
 
 .mdx-body pre {
@@ -626,6 +642,7 @@ ul {
   cursor: pointer;
   transition: all 0.2s ease;
   opacity: 0;
+  z-index: 2;
 }
 
 .code-block:hover .code-copy {
@@ -640,6 +657,36 @@ ul {
 
 .code-copy:active {
   transform: translateY(1px);
+}
+
+.code-expand {
+  position: relative;
+  width: 100%;
+  background: rgba(0, 0, 0, 0.3);
+  color: #a0a0a0;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.code-expand:hover {
+  background: rgba(0, 0, 0, 0.5);
+  color: #ffffff;
+  border-top-color: rgba(255, 255, 255, 0.2);
+}
+
+.code-expand:active {
+  transform: scale(0.98);
 }
 
 
