@@ -39,109 +39,112 @@ jobs:
       - name: Deploy container on VPS
         run: |
           ssh -i ~/.ssh/id_ed25519 ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
-            "CONTAINER_NAME=mikblog IMAGE_NAME=mikblog CONTAINER_PORT='${CONTAINER_PORT}' DOMAIN_ROOT='${DOMAIN_ROOT}' DOMAIN_WWW='${DOMAIN_WWW}' LE_EMAIL='${LE_EMAIL}' bash -s" << 'EOF'
-            set -euo pipefail
+            "CONTAINER_NAME=mikblog IMAGE_NAME=mikblog CONTAINER_PORT='${CONTAINER_PORT}' DOMAIN_ROOT='${DOMAIN_ROOT}' DOMAIN_WWW='${DOMAIN_WWW}' LE_EMAIL='${LE_EMAIL}' bash -s" <<'EOF'
+          set -euo pipefail
 
-            # ---- Run app container (persist SQLite) ----
-            DATA_DIR="/var/lib/${CONTAINER_NAME}"
-            mkdir -p "${DATA_DIR}"
+          # ---- Run app container (persist SQLite) ----
+          DATA_DIR="/var/lib/${CONTAINER_NAME}"
+          mkdir -p "${DATA_DIR}"
 
-            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
-            docker rm "${CONTAINER_NAME}" 2>/dev/null || true
-            docker run -d \
-              --name "${CONTAINER_NAME}" \
-              -p 127.0.0.1:${CONTAINER_PORT}:3000 \
-              -v "${DATA_DIR}:/data" \
-              -e DATABASE_URL="file:/data/dev.db" \
-              --restart unless-stopped \
-              "${IMAGE_NAME}:latest"
+          docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+          docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+          docker run -d \
+            --name "${CONTAINER_NAME}" \
+            -p 127.0.0.1:${CONTAINER_PORT}:3000 \
+            -v "${DATA_DIR}:/data" \
+            -e DATABASE_URL="file:/data/dev.db" \
+            --restart unless-stopped \
+            "${IMAGE_NAME}:latest"
 
-            # ---- Nginx + Let's Encrypt ----
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y
-            apt-get install -y nginx certbot
-            systemctl enable --now nginx
+          # ---- Nginx + Let's Encrypt ----
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y nginx certbot
+          systemctl enable --now nginx
 
-            # 443/TCP 必须留给 Nginx 做 HTTPS；Hy2 通常是 443/UDP，不冲突。
-            if ss -ltnp 2>/dev/null | grep -qE '[:.]443\s'; then
-              if ! ss -ltnp 2>/dev/null | grep -qE '[:.]443\s+.*nginx'; then
-                echo "Error: 443/TCP is already in use by a non-nginx process; cannot enable HTTPS on nginx." >&2
-                ss -ltnp 2>/dev/null | grep -E '[:.]443\s' || true
-                exit 1
-              fi
+          # 443/TCP 必须留给 Nginx 做 HTTPS；Hy2 通常是 443/UDP，不冲突。
+          if ss -ltnp 2>/dev/null | grep -qE '[:.]443[[:space:]]'; then
+            if ! ss -ltnp 2>/dev/null | grep -qE '[:.]443[[:space:]].*nginx'; then
+              echo "Error: 443/TCP is already in use by a non-nginx process; cannot enable HTTPS on nginx." >&2
+              ss -ltnp 2>/dev/null | grep -E '[:.]443[[:space:]]' || true
+              exit 1
             fi
+          fi
 
-            mkdir -p /var/www/letsencrypt
-            NGINX_CONF="/etc/nginx/sites-available/${CONTAINER_NAME}"
-            ln -sf "${NGINX_CONF}" "/etc/nginx/sites-enabled/${CONTAINER_NAME}"
-            rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+          mkdir -p /var/www/letsencrypt
+          NGINX_CONF="/etc/nginx/sites-available/${CONTAINER_NAME}"
+          ln -sf "${NGINX_CONF}" "/etc/nginx/sites-enabled/${CONTAINER_NAME}"
+          rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 
-            # 先写 80 配置用于签发证书（HTTP-01）
-            cat > "${NGINX_CONF}" << NGINX_HTTP
-            server {
-              listen 80;
-              server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
+          # 先写 80 配置用于签发证书（HTTP-01）
+          cat > "${NGINX_CONF}" <<NGINX_HTTP
+          server {
+            listen 80;
+            listen [::]:80;
+            server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
 
-              location ^~ /.well-known/acme-challenge/ {
-                root /var/www/letsencrypt;
-                default_type "text/plain";
-              }
-
-              location / {
-                return 301 https://\$host\$request_uri;
-              }
-            }
-            NGINX_HTTP
-
-            nginx -t
-            systemctl reload nginx
-
-            CERTBOT_ARGS=(certonly --webroot -w /var/www/letsencrypt -d "${DOMAIN_ROOT}" -d "${DOMAIN_WWW}" --agree-tos --non-interactive --keep-until-expiring)
-            if [ -n "${LE_EMAIL:-}" ]; then
-              CERTBOT_ARGS+=( -m "${LE_EMAIL}" )
-            else
-              CERTBOT_ARGS+=( --register-unsafely-without-email )
-            fi
-            certbot "${CERTBOT_ARGS[@]}"
-
-            # 写 443 反代 + 80->443
-            cat > "${NGINX_CONF}" << NGINX_HTTPS
-            server {
-              listen 80;
-              server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
-
-              location ^~ /.well-known/acme-challenge/ {
-                root /var/www/letsencrypt;
-                default_type "text/plain";
-              }
-
-              location / {
-                return 301 https://\$host\$request_uri;
-              }
+            location ^~ /.well-known/acme-challenge/ {
+              root /var/www/letsencrypt;
+              default_type "text/plain";
             }
 
-            server {
-              listen 443 ssl http2;
-              server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
-
-              ssl_certificate /etc/letsencrypt/live/${DOMAIN_ROOT}/fullchain.pem;
-              ssl_certificate_key /etc/letsencrypt/live/${DOMAIN_ROOT}/privkey.pem;
-              ssl_protocols TLSv1.2 TLSv1.3;
-
-              location / {
-                proxy_pass http://127.0.0.1:${CONTAINER_PORT};
-                proxy_http_version 1.1;
-                proxy_set_header Host \$host;
-                proxy_set_header X-Real-IP \$remote_addr;
-                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto https;
-              }
+            location / {
+              return 301 https://\$host\$request_uri;
             }
-            NGINX_HTTPS
+          }
+          NGINX_HTTP
 
-            nginx -t
-            systemctl reload nginx
-            systemctl enable --now certbot.timer >/dev/null 2>&1 || true
+          nginx -t
+          systemctl reload nginx
+
+          CERTBOT_ARGS=(certonly --webroot -w /var/www/letsencrypt -d "${DOMAIN_ROOT}" -d "${DOMAIN_WWW}" --agree-tos --non-interactive --keep-until-expiring)
+          if [ -n "${LE_EMAIL:-}" ]; then
+            CERTBOT_ARGS+=( -m "${LE_EMAIL}" )
+          else
+            CERTBOT_ARGS+=( --register-unsafely-without-email )
+          fi
+          certbot "${CERTBOT_ARGS[@]}"
+
+          # 写 443 反代 + 80->443
+          cat > "${NGINX_CONF}" <<NGINX_HTTPS
+          server {
+            listen 80;
+            listen [::]:80;
+            server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
+
+            location ^~ /.well-known/acme-challenge/ {
+              root /var/www/letsencrypt;
+              default_type "text/plain";
+            }
+
+            location / {
+              return 301 https://\$host\$request_uri;
+            }
+          }
+
+          server {
+            listen 443 ssl http2;
+            listen [::]:443 ssl http2;
+            server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
+
+            ssl_certificate /etc/letsencrypt/live/${DOMAIN_ROOT}/fullchain.pem;
+            ssl_certificate_key /etc/letsencrypt/live/${DOMAIN_ROOT}/privkey.pem;
+            ssl_protocols TLSv1.2 TLSv1.3;
+
+            location / {
+              proxy_pass http://127.0.0.1:${CONTAINER_PORT};
+              proxy_http_version 1.1;
+              proxy_set_header Host \$host;
+              proxy_set_header X-Real-IP \$remote_addr;
+              proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto https;
+            }
+          }
+          NGINX_HTTPS
+
+          nginx -t
+          systemctl reload nginx
+          systemctl enable --now certbot.timer >/dev/null 2>&1 || true
           EOF
 
       - name: Cleanup old images on VPS

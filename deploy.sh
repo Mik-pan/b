@@ -60,16 +60,16 @@ else
   nginx || true
 fi
 
-# 443/TCP 必须留给 Nginx 做 HTTPS；Hy2 常见使用 443/UDP，不冲突。
-if command -v ss >/dev/null 2>&1; then
-  if ss -ltnp 2>/dev/null | grep -qE '[:.]443\\s'; then
-    if ! ss -ltnp 2>/dev/null | grep -qE '[:.]443\\s+.*nginx'; then
-      echo "Error: 443/TCP is already in use by a non-nginx process; cannot enable HTTPS on nginx." >&2
-      ss -ltnp 2>/dev/null | grep -E '[:.]443\\s' || true
-      exit 1
+  # 443/TCP 必须留给 Nginx 做 HTTPS；Hy2 常见使用 443/UDP，不冲突。
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltnp 2>/dev/null | grep -qE '[:.]443[[:space:]]'; then
+      if ! ss -ltnp 2>/dev/null | grep -qE '[:.]443[[:space:]].*nginx'; then
+        echo "Error: 443/TCP is already in use by a non-nginx process; cannot enable HTTPS on nginx." >&2
+        ss -ltnp 2>/dev/null | grep -E '[:.]443[[:space:]]' || true
+        exit 1
+      fi
     fi
   fi
-fi
 
 mkdir -p /var/www/letsencrypt
 
@@ -85,6 +85,7 @@ fi
 cat > "${NGINX_CONF}" << NGINX_HTTP
 server {
   listen 80;
+  listen [::]:80;
   server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
 
   location ^~ /.well-known/acme-challenge/ {
@@ -117,6 +118,7 @@ certbot "${CERTBOT_ARGS[@]}"
 cat > "${NGINX_CONF}" << NGINX_HTTPS
 server {
   listen 80;
+  listen [::]:80;
   server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
 
   location ^~ /.well-known/acme-challenge/ {
@@ -131,6 +133,7 @@ server {
 
 server {
   listen 443 ssl http2;
+  listen [::]:443 ssl http2;
   server_name ${DOMAIN_ROOT} ${DOMAIN_WWW};
 
   ssl_certificate /etc/letsencrypt/live/${DOMAIN_ROOT}/fullchain.pem;
