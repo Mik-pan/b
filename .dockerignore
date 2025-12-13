@@ -4,3 +4,4 @@ node_modules
 *.md
 .DS_Store
 .env*.local
+prisma/dev.db
