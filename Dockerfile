@@ -3,9 +3,9 @@ FROM node:20-alpine AS deps
 # Prisma 在 Alpine 上需要 OpenSSL（Node 20 的 alpine 基础镜像已是 OpenSSL 3 系列）
 RUN apk add --no-cache openssl
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package*.json ./
 COPY prisma ./prisma
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci; else npm install --include=dev; fi
 RUN npx prisma generate
 
 # 阶段2: 构建
