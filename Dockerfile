@@ -34,6 +34,8 @@ RUN mkdir -p /data
 # 复制 standalone 输出
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+# 🔥 关键：复制预渲染的页面数据（包含 SSG 生成的 HTML 和 RSC payload）
+COPY --from=builder /app/.next/server ./.next/server
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/prisma ./prisma
 # 为了在容器启动时执行 migrate deploy，需要 Prisma CLI（来自 deps 的完整 node_modules）
