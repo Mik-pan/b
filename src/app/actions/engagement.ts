@@ -4,12 +4,15 @@ import { revalidatePath } from "next/cache";
 import { getEngagementForRequest } from "@/lib/engagement";
 import { prisma } from "@/lib/prisma";
 import { getClientIdentity } from "@/lib/session";
+import { Prisma } from "@prisma/client";
+
+type TransactionClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
 
 export const recordViewAction = async (slug: string, title?: string) => {
   const { sessionId, ipHash } = await getClientIdentity({ createCookie: true });
   if (!sessionId) return { views: 0 };
 
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: TransactionClient) => {
     await tx.episode.upsert({
       where: { slug },
       create: { slug, title },

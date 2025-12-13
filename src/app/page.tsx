@@ -12,13 +12,12 @@ const formatDate = (value: string) => {
   return `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, "0")}.${String(date.getDate()).padStart(2, "0")}`;
 };
 
-const brand = "NAME_SPACE";
+const brand = "CODE_SPACE";
 const navItems = [
   { label: "[01] 首页 / Home", href: "/" },
-  { label: "[02] 归档 / Archives", href: "/archives" },
-  { label: "[03] 项目 / Projects", href: "/projects" },
-  { label: "[04] 关于 / About", href: "/about" },
-  { label: "[05] 订阅 / RSS", href: "/rss.xml" },
+  { label: "[02] 关于 / About", href: "/about" },
+  { label: "[03] 订阅 / Subscribe", href: "/subscribe" },
+  { label: "[04] 贡献 / Contribute", href: "/contribute" },
 ];
 
 export default async function Home() {

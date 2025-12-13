@@ -1,0 +1,189 @@
+/* Contribute Page Styles */
+
+/* Base Layout - inherits global .layout and .sidebar, but needs content override */
+.contribute-container {
+    overflow-y: auto;
+    background-color: var(--bg-color);
+}
+
+.contribute-hero {
+    padding: 60px var(--spacing);
+    border-bottom: var(--border-width) solid var(--border-color);
+    background-color: #f0f0f0;
+    background-image:
+        linear-gradient(45deg, #e5e5e5 25%, transparent 25%),
+        linear-gradient(-45deg, #e5e5e5 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #e5e5e5 75%),
+        linear-gradient(-45deg, transparent 75%, #e5e5e5 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+
+.contribute-hero h1 {
+    font-size: 3rem;
+    line-height: 1.1;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    background: #fff;
+    display: inline-block;
+    padding: 10px 20px 5px 0;
+}
+
+.contribute-hero p {
+    font-size: 1.2rem;
+    color: #444;
+    font-family: var(--font-mono);
+    background: #fff;
+    display: inline-block;
+    padding: 5px 10px;
+}
+
+.section-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 30px;
+    display: flex;
+    align-items: center;
+}
+
+.section-title::before {
+    content: "#";
+    color: var(--accent-color);
+    margin-right: 10px;
+}
+
+/* Steps Section */
+.steps-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: var(--spacing);
+    margin-bottom: 60px;
+}
+
+.step-card {
+    border: var(--border-width) solid var(--border-color);
+    padding: 30px;
+    background: #fff;
+    transition: transform 0.2s;
+    position: relative;
+}
+
+.step-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 10px 10px 0 #eee;
+}
+
+.step-number {
+    font-size: 3rem;
+    font-weight: 900;
+    color: #f1f1f1;
+    position: absolute;
+    top: 10px;
+    right: 20px;
+    z-index: 0;
+}
+
+.step-content {
+    position: relative;
+    z-index: 1;
+}
+
+.step-content h3 {
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+}
+
+.step-content p {
+    font-size: 0.95rem;
+    color: #666;
+    line-height: 1.6;
+}
+
+/* Rules Section */
+.rules-container {
+    background: #111;
+    color: #fff;
+    padding: 40px;
+    margin-bottom: 60px;
+    position: relative;
+    overflow: hidden;
+}
+
+.rules-container::after {
+    content: "RULES";
+    position: absolute;
+    bottom: -20px;
+    right: 0;
+    font-size: 8rem;
+    font-weight: 900;
+    color: rgba(255, 255, 255, 0.05);
+    pointer-events: none;
+}
+
+.rules-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 30px;
+    margin-top: 30px;
+}
+
+.rule-item {
+    border-left: 2px solid var(--accent-color);
+    padding-left: 20px;
+}
+
+.rule-item h4 {
+    font-size: 1.1rem;
+    color: var(--accent-color);
+    margin-bottom: 8px;
+}
+
+.rule-item p {
+    color: #ccc;
+    font-size: 0.95rem;
+    line-height: 1.6;
+}
+
+/* Categories */
+.category-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 15px;
+    margin-top: 20px;
+}
+
+.cat-badge {
+    padding: 8px 16px;
+    border: 1px solid var(--border-color);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    background: #fff;
+}
+
+/* CTA */
+.apply-box {
+    text-align: center;
+    padding: 60px;
+    border: 2px dashed #ccc;
+    margin: var(--spacing);
+}
+
+.email-link {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--accent-color);
+    text-decoration: underline;
+}
+
+@media (max-width: 768px) {
+    .rules-list {
+        grid-template-columns: 1fr;
+    }
+
+    .contribute-hero h1 {
+        font-size: 2rem;
+    }
+}

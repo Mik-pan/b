@@ -1,0 +1,444 @@
+/* ========== Episode Detail Page Styles ========== */
+.episode-layout {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    width: 100vw;
+    min-height: 100vh;
+    background: #f7f7f7;
+    color: #0f172a;
+    position: relative;
+}
+
+.episode-aside {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    padding: 32px 24px;
+    border-right: 2px solid var(--border-color);
+    background: #ffffff;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.back-link {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #111111;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: 0.02em;
+}
+
+.back-link:hover {
+    color: var(--accent-color);
+}
+
+.episode-meta {
+    display: grid;
+    gap: 10px;
+}
+
+.episode-meta-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid #d1d5db;
+}
+
+.episode-meta-row .label {
+    font-size: 0.85rem;
+    color: #475569;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    min-width: 50px;
+}
+
+.episode-meta-row .value {
+    font-size: 0.95rem;
+    font-weight: 700;
+    text-align: right;
+}
+
+/* 标签行特殊布局 */
+.episode-meta-row.tags-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.episode-meta-row.tags-row .value {
+    text-align: left;
+    width: 100%;
+}
+
+.tag-list {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+}
+
+.pill {
+    padding: 3px 8px;
+    border: 1px solid #111111;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    color: #0f172a;
+    background: #f7f7f7;
+    white-space: nowrap;
+}
+
+.episode-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.pill-btn {
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid #111111;
+    background: #ffffff;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.2s, border-color 0.2s;
+    letter-spacing: 0.04em;
+}
+
+.pill-btn:hover {
+    background: #111111;
+    color: #ffffff;
+    border-color: #111111;
+}
+
+.pill-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.pill-btn-active {
+    background: #111111;
+    color: #ffffff;
+}
+
+.episode-main {
+    padding: 40px 48px;
+    width: 100%;
+    height: 100vh;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--accent-color) transparent;
+}
+
+.episode-container {
+    width: 100%;
+    max-width: 768px;
+    margin: 0 auto;
+    display: grid;
+    gap: 32px;
+}
+
+.episode-header {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 32px;
+}
+
+.episode-date {
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #6b7280;
+    font-size: 0.9rem;
+}
+
+.episode-title {
+    font-size: 2.6rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.episode-desc {
+    font-size: 1.1rem;
+    color: #4b5563;
+}
+
+.episode-comments {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.comments-title {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin-bottom: 16px;
+}
+
+.comment-placeholder {
+    padding: 16px;
+    border: 1px dashed #cbd5e1;
+    background: #f8fafc;
+    border-radius: 8px;
+    color: #475569;
+    display: grid;
+    gap: 8px;
+}
+
+.comments-box {
+    display: grid;
+    gap: 16px;
+}
+
+.comment-form textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #ffffff;
+    font-family: var(--font-mono);
+    resize: vertical;
+    min-height: 100px;
+}
+
+.comment-form textarea:focus {
+    outline: 2px solid var(--accent-color);
+}
+
+.comment-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.comment-actions button {
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid #111111;
+    background: #111111;
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.comment-actions button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.comment-error {
+    color: #dc2626;
+    font-size: 0.9rem;
+}
+
+.comment-list {
+    display: grid;
+    gap: 14px;
+    list-style: none;
+    padding: 0;
+}
+
+.comment-item {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #ffffff;
+}
+
+.comment-meta {
+    font-size: 0.85rem;
+    color: #6b7280;
+    margin-bottom: 6px;
+}
+
+.comment-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 1rem;
+}
+
+.episode-main::-webkit-scrollbar {
+    width: 10px;
+}
+
+.episode-main::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.episode-main::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border: 2px solid #f7f7f7;
+    border-radius: 12px;
+}
+
+.episode-main::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+}
+
+/* Tablet: Episode Detail Page */
+@media (min-width: 641px) and (max-width: 1024px) {
+    .episode-layout {
+        grid-template-columns: 240px 1fr;
+    }
+
+    .episode-aside {
+        padding: 24px 16px;
+    }
+
+    .episode-main {
+        padding: 32px 24px;
+    }
+
+    .episode-title {
+        font-size: 2.2rem;
+    }
+}
+
+/* Mobile: Episode Detail Page */
+@media (max-width: 640px) {
+    .episode-layout {
+        grid-template-columns: 1fr;
+        min-height: auto;
+    }
+
+    .episode-aside {
+        position: relative;
+        height: auto;
+        padding: 16px;
+        border-right: none;
+        border-bottom: 2px solid var(--border-color);
+        gap: 12px;
+    }
+
+    .back-link {
+        font-size: 0.9rem;
+        margin-bottom: 8px;
+    }
+
+    .episode-meta {
+        gap: 8px;
+    }
+
+    .episode-meta-row {
+        flex-direction: row;
+        padding: 4px 0;
+        gap: 8px;
+    }
+
+    .episode-meta-row .label {
+        font-size: 0.75rem;
+        min-width: 60px;
+    }
+
+    .episode-meta-row .value {
+        font-size: 0.85rem;
+    }
+
+    .tag-list {
+        gap: 6px;
+    }
+
+    .pill {
+        font-size: 0.75rem;
+        padding: 3px 8px;
+    }
+
+    .episode-actions {
+        gap: 6px;
+    }
+
+    .pill-btn {
+        padding: 6px 10px;
+        font-size: 0.85rem;
+        min-height: 44px;
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .episode-main {
+        padding: 20px 16px;
+        height: auto;
+    }
+
+    .episode-container {
+        gap: 24px;
+    }
+
+    .episode-header {
+        margin-bottom: 24px;
+        gap: 8px;
+    }
+
+    .episode-date {
+        font-size: 0.8rem;
+    }
+
+    .episode-title {
+        font-size: 1.75rem;
+        line-height: 1.25;
+    }
+
+    .episode-desc {
+        font-size: 0.95rem;
+        line-height: 1.6;
+    }
+
+    .episode-comments {
+        margin-top: 32px;
+        padding-top: 20px;
+    }
+
+    .comments-title {
+        font-size: 1.15rem;
+        margin-bottom: 12px;
+    }
+
+    .comment-form textarea {
+        padding: 8px 10px;
+        font-size: 0.9rem;
+        min-height: 80px;
+    }
+
+    .comment-actions button {
+        padding: 10px 16px;
+        font-size: 0.9rem;
+        min-height: 44px;
+    }
+
+    .comment-item {
+        padding: 8px 10px;
+    }
+
+    .comment-meta {
+        font-size: 0.8rem;
+    }
+
+    .comment-content {
+        font-size: 0.9rem;
+    }
+}
+
+/* Very small mobile devices */
+@media (max-width: 375px) {
+    .episode-title {
+        font-size: 1.5rem;
+    }
+
+    .episode-main {
+        padding: 16px 12px;
+    }
+
+    .pill-btn {
+        font-size: 0.8rem;
+        padding: 5px 8px;
+    }
+}

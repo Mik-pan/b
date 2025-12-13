@@ -1,0 +1,221 @@
+/* Subscribe Page Styles */
+
+/* Reuse main-content but allow scrolling if needed */
+.subscribe-content {
+    overflow-y: auto;
+    background-color: var(--bg-color);
+}
+
+.subscribe-hero {
+    padding: 60px var(--spacing);
+    border-bottom: var(--border-width) solid var(--border-color);
+    background-image: radial-gradient(var(--text-color) 1px, transparent 1px);
+    background-size: 20px 20px;
+    background-color: rgba(0, 0, 0, 0.02);
+}
+
+.subscribe-hero h1 {
+    font-size: 3rem;
+    line-height: 1.1;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+}
+
+.subscribe-hero p {
+    font-size: 1.2rem;
+    color: #444;
+}
+
+/* Pricing Section */
+.pricing-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--spacing);
+    padding: var(--spacing);
+    align-items: stretch;
+}
+
+.pricing-card {
+    border: var(--border-width) solid var(--border-color);
+    padding: 30px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: transform 0.2s, box-shadow 0.2s;
+    background: #fff;
+    position: relative;
+}
+
+.pricing-card:hover {
+    box-shadow: 8px 8px 0px rgba(0, 0, 0, 0.1);
+    transform: translate(-2px, -2px);
+}
+
+.pricing-card.featured {
+    background-color: #fff8f5;
+    /* Very light orange tint */
+    border-color: var(--accent-color);
+    box-shadow: 8px 8px 0px rgba(234, 88, 12, 0.2);
+}
+
+.pricing-card.featured:hover {
+    box-shadow: 12px 12px 0px rgba(234, 88, 12, 0.3);
+}
+
+.promo-badge {
+    position: absolute;
+    top: -12px;
+    right: 20px;
+    background: var(--accent-color);
+    color: #fff;
+    padding: 4px 12px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    border: 1px solid var(--border-color);
+    transform: rotate(2deg);
+}
+
+.card-header {
+    margin-bottom: 30px;
+    text-align: center;
+}
+
+.card-header h2 {
+    font-size: 1.5rem;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+}
+
+.price {
+    font-size: 3rem;
+    font-weight: 800;
+    font-family: var(--font-mono);
+    margin: 10px 0;
+}
+
+.original-price {
+    font-size: 1.2rem;
+    text-decoration: line-through;
+    color: #999;
+    margin-right: 10px;
+}
+
+.current-price {
+    color: var(--accent-color);
+}
+
+.period {
+    font-size: 1rem;
+    color: #666;
+    font-weight: normal;
+}
+
+.plan-type {
+    font-size: 0.9rem;
+    color: #666;
+    letter-spacing: 1px;
+}
+
+.features {
+    margin-bottom: 30px;
+    flex-grow: 1;
+}
+
+.features li {
+    margin-bottom: 12px;
+    font-size: 0.95rem;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed #eee;
+}
+
+.features li:last-child {
+    border-bottom: none;
+}
+
+.features li.disabled {
+    color: #aaa;
+    text-decoration: line-through;
+}
+
+/* Buttons */
+.cta-button {
+    width: 100%;
+    padding: 15px;
+    font-weight: bold;
+    text-transform: uppercase;
+    cursor: pointer;
+    border: var(--border-width) solid var(--border-color);
+    transition: all 0.2s;
+    text-align: center;
+}
+
+.cta-button.outline {
+    background: transparent;
+    color: var(--text-color);
+    cursor: default;
+    opacity: 0.6;
+}
+
+.cta-button.primary {
+    background: var(--accent-color);
+    color: white;
+    border-color: var(--border-color);
+}
+
+.cta-button.primary:hover {
+    background: #c2410c;
+    /* Darker orange */
+    transform: translateY(-2px);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.2);
+}
+
+/* FAQ Section */
+.faq-section {
+    padding: var(--spacing);
+    border-top: var(--border-width) solid var(--border-color);
+}
+
+.faq-section h3 {
+    font-size: 1.5rem;
+    margin-bottom: 20px;
+    text-transform: uppercase;
+}
+
+.faq-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--spacing);
+}
+
+.faq-item {
+    padding: 20px;
+    background: #fafafa;
+    border: 1px solid #ddd;
+}
+
+.faq-item h4 {
+    margin-bottom: 10px;
+    font-weight: bold;
+}
+
+.faq-item p {
+    font-size: 0.9rem;
+    color: #555;
+    line-height: 1.6;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .pricing-container {
+        grid-template-columns: 1fr;
+    }
+
+    .faq-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .subscribe-hero h1 {
+        font-size: 2rem;
+    }
+}

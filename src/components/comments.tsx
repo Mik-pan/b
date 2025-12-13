@@ -37,7 +37,7 @@ export function Comments({ slug }: CommentsProps) {
     try {
       const data = await listComments(slug);
       setItems(
-        data.map((c) => ({
+        data.map((c: { id: number; content: string; createdAt: Date; parentId: number | null }) => ({
           ...c,
           createdAt: c.createdAt instanceof Date ? c.createdAt.toISOString() : String(c.createdAt),
         })),

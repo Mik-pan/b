@@ -5,6 +5,7 @@ const withMDX = createMDX();
 
 const nextConfig: NextConfig = {
   pageExtensions: ["ts", "tsx", "mdx"],
+  output: "standalone",
   turbopack: {
     root: __dirname,
   },

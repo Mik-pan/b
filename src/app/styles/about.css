@@ -1,0 +1,172 @@
+/* About Page Content Styles */
+/* Note: The main layout structure is handled by .layout and .sidebar in home.css (global) */
+
+.about-container {
+    overflow-y: auto;
+    background-color: var(--bg-color);
+}
+
+.about-hero {
+    padding: 60px var(--spacing);
+    border-bottom: var(--border-width) solid var(--border-color);
+    background-color: #f8f8f8;
+    /* Slightly different bg to distinguish */
+}
+
+.about-hero h1 {
+    font-size: 3rem;
+    line-height: 1.1;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+}
+
+.about-hero p {
+    font-size: 1.2rem;
+    color: #444;
+    font-family: var(--font-mono);
+}
+
+.content-grid {
+    padding: var(--spacing);
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.about-section {
+    margin-bottom: 60px;
+}
+
+.about-section h2 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 24px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--border-color);
+    letter-spacing: 1px;
+}
+
+.text-block p {
+    font-size: 1.05rem;
+    line-height: 1.8;
+    margin-bottom: 20px;
+    color: #333;
+    max-width: 700px;
+}
+
+.text-block strong {
+    color: var(--accent-color);
+}
+
+/* Tech Stack Grid */
+.tech-stack-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+}
+
+.tech-item {
+    border: 1px solid var(--border-color);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    transition: background 0.2s;
+}
+
+.tech-item:hover {
+    background: #111;
+    color: #fff;
+}
+
+.tech-item:hover .tech-num {
+    color: var(--accent-color);
+}
+
+.tech-item:hover .tech-desc {
+    color: #ccc;
+}
+
+.tech-num {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: #888;
+    margin-bottom: 10px;
+    display: block;
+}
+
+.tech-name {
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin-bottom: 5px;
+}
+
+.tech-desc {
+    font-size: 0.9rem;
+    color: #666;
+}
+
+/* Author Section */
+.author-block {
+    display: flex;
+    gap: 30px;
+    align-items: flex-start;
+}
+
+.author-info h3 {
+    font-size: 2rem;
+    font-weight: 800;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+}
+
+.author-info .role {
+    font-family: var(--font-mono);
+    color: var(--accent-color);
+    font-size: 0.9rem;
+    margin-bottom: 15px;
+}
+
+/* Highlight Box (CTA) */
+.highlight-box {
+    background: #111;
+    color: #fff;
+    padding: 40px;
+    margin-bottom: 0;
+    /* Last item */
+}
+
+.highlight-box h2 {
+    border-bottom-color: #555;
+    color: #fff;
+}
+
+.highlight-content p {
+    color: #ccc;
+    font-size: 1.1rem;
+    margin-bottom: 30px;
+    max-width: 600px;
+}
+
+.link-arrow {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--accent-color);
+    transition: padding-left 0.2s;
+}
+
+.link-arrow:hover {
+    padding-left: 10px;
+    text-decoration: underline;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+    .tech-stack-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .about-hero h1 {
+        font-size: 2rem;
+    }
+}

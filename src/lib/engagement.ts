@@ -66,13 +66,13 @@ export const getEngagementTotals = async (slugs: string[]) => {
     map[slug] = { views: 0, likes: 0 };
   });
 
-  viewGroups.forEach((group) => {
+  viewGroups.forEach((group: { slug: string; _count: { slug: number } }) => {
     if (map[group.slug]) {
       map[group.slug].views = group._count.slug;
     }
   });
 
-  likeGroups.forEach((group) => {
+  likeGroups.forEach((group: { slug: string; _count: { slug: number } }) => {
     if (map[group.slug]) {
       map[group.slug].likes = group._count.slug;
     }

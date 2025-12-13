@@ -20,8 +20,8 @@ const jetBrains = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "DEV_LOG",
-    template: "%s | DEV_LOG",
+    default: "CODE_SPACE",
+    template: "%s | CODE_SPACE",
   },
   description: "开发者博客 / Podcast Notes：记录技术思考与系统设计。",
   metadataBase: new URL(

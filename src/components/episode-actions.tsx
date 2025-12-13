@@ -105,7 +105,7 @@ export function EpisodeActions({
         </div>
       ) : null}
       {tags?.length ? (
-        <div className="episode-meta-row">
+        <div className="episode-meta-row tags-row">
           <span className="label">标签</span>
           <div className="tag-list">
             {tags.slice(0, 4).map((tag) => (
