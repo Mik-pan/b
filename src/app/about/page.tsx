@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Navigation } from "@/components/navigation";
 // home.css and base.css are globally imported, so we just need about.css for specific content styles
 // But we need to ensure about.css doesn't conflict. 
 // We will rely on global class names for layout.
@@ -24,15 +25,7 @@ export default function AboutPage() {
           <Link href="/" className="brand">
             {brand}
           </Link>
-          <nav>
-            <ul className="nav-menu">
-              {navItems.map((item) => (
-                <li key={item.href}>
-                  <Link href={item.href}>{item.label}</Link>
-                </li>
-              ))}
-            </ul>
-          </nav>
+          <Navigation items={navItems} />
         </div>
 
         <div className="status-box">

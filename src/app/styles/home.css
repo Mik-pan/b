@@ -48,15 +48,22 @@
 }
 
 .nav-menu a {
-    font-size: 1.1rem;
-    font-weight: 600;
     display: block;
-    transition: color 0.2s;
+    padding: 8px 0;
+    color: #666666;
+    transition: color 0.2s ease;
 }
 
 .nav-menu a:hover {
     color: var(--accent-color);
-    text-decoration: underline;
+}
+
+.nav-menu a.active {
+    color: var(--accent-color);
+    font-weight: 600;
+    border-left: 3px solid var(--accent-color);
+    padding-left: 10px;
+    margin-left: -10px;
 }
 
 .status-box {

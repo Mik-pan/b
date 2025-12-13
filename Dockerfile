@@ -25,6 +25,7 @@ FROM node:20-alpine AS runner
 # 运行期 Prisma Query Engine 也依赖 OpenSSL
 RUN apk add --no-cache openssl libc6-compat
 WORKDIR /app
+LABEL com.mikblog.app="mikblog"
 ENV NODE_ENV=production
 ENV NEXT_PUBLIC_SITE_URL=https://www.miklog.space
 ENV DATABASE_URL="file:/data/dev.db"

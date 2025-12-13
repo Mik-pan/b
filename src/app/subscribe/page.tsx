@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Navigation } from "@/components/navigation";
 
 
 export const metadata = {
@@ -22,15 +23,7 @@ export default function SubscribePage() {
                     <Link href="/" className="brand">
                         {brand}
                     </Link>
-                    <nav>
-                        <ul className="nav-menu">
-                            {navItems.map((item) => (
-                                <li key={item.href}>
-                                    <Link href={item.href}>{item.label}</Link>
-                                </li>
-                            ))}
-                        </ul>
-                    </nav>
+                    <Navigation items={navItems} />
                 </div>
 
                 <div className="status-box">
