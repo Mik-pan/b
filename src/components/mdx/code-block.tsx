@@ -56,7 +56,7 @@ export function CodeBlock({ children, className, ...rest }: PreProps) {
         {...rest}
         style={{
           maxHeight: needsExpansion && !isExpanded ? `${MAX_HEIGHT}px` : undefined,
-          overflow: needsExpansion && !isExpanded ? "hidden" : undefined,
+          overflowY: needsExpansion && !isExpanded ? "hidden" : undefined,
         }}
       >
         {children}

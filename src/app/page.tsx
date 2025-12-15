@@ -81,7 +81,7 @@ export default async function Home() {
                 className="post-item"
               >
                 <div className="post-date">{formatDate(episode.date)}</div>
-                <div className="post-title">{episode.title}</div>
+                <div className="post-title">{episode.listTitle ?? episode.title}</div>
                 <div className="post-meta-right">
                   {episode.tags?.length ? (
                     <span className="post-tag">{episode.tags[0]}</span>

@@ -1,7 +1,7 @@
 /* ========== Episode Detail Page Styles ========== */
 .episode-layout {
     display: grid;
-    grid-template-columns: 300px 1fr;
+    grid-template-columns: 300px minmax(0, 1fr);
     width: 100vw;
     min-height: 100vh;
     background: #f7f7f7;
@@ -130,6 +130,7 @@
 .episode-main {
     padding: 40px 48px;
     width: 100%;
+    min-width: 0;
     height: 100vh;
     overflow-y: auto;
     scrollbar-width: thin;
@@ -285,7 +286,7 @@
 /* Tablet: Episode Detail Page */
 @media (min-width: 641px) and (max-width: 1024px) {
     .episode-layout {
-        grid-template-columns: 240px 1fr;
+        grid-template-columns: 240px minmax(0, 1fr);
     }
 
     .episode-aside {

@@ -1,0 +1,1657 @@
+---
+title: "WebSocket 客服聊天系统（III）：稳定性与限制——100 连接上限排队、限流、幂等、7 日窗口"
+date: "2025-12-15"
+episode: "E06"
+cover: "/covers/ws-support-chat-3.jpg"
+description: "基于第二部的可用 Demo 继续硬化：客户连接上限 + FIFO 排队（不踢已连接客户）、客服永远可连、心跳清理、限流、消息幂等、历史 7 日窗口。"
+tags:
+  - websocket
+  - nodejs
+  - typescript
+  - reliability
+  - security
+---
+
+## 大纲
+
+- 先把问题定义清楚：哪些前提可验证？哪些无法保证？
+- 协议升级：为排队/重试/幂等/分页补齐字段
+- Store 升级：幂等索引 + cursor 历史 + 7 日窗口
+- WS 硬化：心跳清死连接、限流、连接上限 100 + FIFO 排队
+- 客户端硬化：排队提示 + 按 `retry_after_ms` 自动重试（客服被替换时停止重连）
+
+## 背景
+
+第二部“能聊”之后，马上会遇到这些真实问题：
+
+- **假满员**：客户网络掉了，但服务端没 close，连接槽位一直占着
+- **重连风暴**：断网后所有用户同时重连，服务端被压垮
+- **重复消息**：用户连点发送/重试，出现重复消息或重复写入
+- **历史无限长**：越用越慢，直到你不敢让用户点“加载更多”
+- **连接上限与公平性**：超过 100 怎么排队？怎么保证不随意踢掉已连接客户？
+
+这一部我们把这些问题变成 **可以运行、可以复现、可以检查** 的改造。
+
+## 0. 前提、边界与“无法保证”
+
+这一部的优化是建立在**可验证的前提**之上的：
+
+1. **单实例部署**：只有一个 Node 进程承载 WS（否则队列与限流需要共享存储）
+2. **单客服**：同一时间只有一个客服工作（但可能会出现多开 tab）
+3. **不做 one-to-one 隔离**：客服可订阅任意会话（不讨论“抢单/分配”）
+
+### 无法保证（如果违反前提）
+
+- 多实例下的 FIFO 公平性：若没有 Redis 之类的共享队列，无法保证排队顺序
+- 多实例下的连接上限：每个实例各算各的，合并后会超标
+- 多实例下的限流准确性：内存限流只能限制“本实例”
+
+如果你要上生产多实例，请把下面这些模块替换成共享实现：
+
+- `queue`：Redis list / sorted set
+- `rateLimit`：Redis token bucket / gateway 限流
+- 会话与消息：DB（并增加索引与幂等约束）
+
+---
+
+## 1. 本文改动清单（新增/替换文件）
+
+在第二部的项目基础上：
+
+**新增**
+
+- `src/ws/rateLimit.ts`：内存限流器
+- `src/ws/queue.ts`：客户鉴权排队 FIFO 队列
+- `public/chatClient.js`：一个最小的“可重连 WS 客户端”封装
+
+**替换**
+
+- `src/ws/protocol.ts`：补齐 queue/幂等/分页字段
+- `src/chat/store.ts`：加入幂等索引 + cursor 历史 + cutoff
+- `src/ws/server.ts`：接入心跳、限流、连接上限与排队
+- `public/customer.html`、`public/agent.html`：改用 `chatClient.js` 并支持排队重试
+
+---
+
+## 2. 协议升级：让客户端“可预测”地处理错误与重试
+
+**文件：`src/ws/protocol.ts`（完整替换）**
+
+```ts
+export type ClientType = 'customer' | 'agent';
+
+export type UserDTO = {
+  id: number;
+  name: string;
+  role: ClientType;
+};
+
+export type ConversationDTO = {
+  id: string;
+  customerId: number;
+  status: 'pending' | 'open' | 'closed';
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+};
+
+export type MessageDTO = {
+  id: string;
+  conversationId: string;
+  senderType: 'customer' | 'agent' | 'system';
+  senderId: number | null;
+  type: 'text' | 'image';
+  body: string | null;
+  fileUrl: string | null;
+  thumbnailUrl: string | null;
+  clientMessageId: string | null;
+  createdAt: string;
+};
+
+export type ClientToServer =
+  | { type: 'auth'; token: string; queue_ticket?: string }
+  | { type: 'ping'; ts?: number }
+  | { type: 'subscribe'; conversationId: string }
+  | { type: 'history'; conversationId: string; limit?: number; offset?: number; before?: string }
+  | {
+      type: 'message';
+      conversationId: string;
+      messageType: 'text' | 'image';
+      body?: string;
+      fileUrl?: string;
+      thumbnailUrl?: string;
+      clientMessageId?: string;
+    };
+
+export type ServerErrorCode =
+  | 'BAD_REQUEST'
+  | 'UNAUTHORIZED'
+  | 'FORBIDDEN'
+  | 'NOT_FOUND'
+  | 'RATE_LIMITED'
+  | 'INTERNAL_ERROR'
+  | 'QUEUED'
+  | 'SERVER_BUSY'
+  | 'REPLACED';
+
+export type ServerToClient =
+  | { type: 'hello'; required: Array<'auth'> }
+  | { type: 'auth_ok'; user: UserDTO; conversation?: ConversationDTO }
+  | { type: 'pong'; ts: number }
+  | { type: 'conversation'; conversation: ConversationDTO }
+  | { type: 'history'; conversationId: string; messages: MessageDTO[]; meta: { has_more: boolean } }
+  | { type: 'message'; message: MessageDTO }
+  | {
+      type: 'error';
+      code: ServerErrorCode;
+      message: string;
+      retry_after_ms?: number;
+      client_message_id?: string;
+      queue_ticket?: string;
+      queue_position?: number;
+    };
+```
+
+**可检查点**：客户端只要看 `code` 就能判断是否需要重试、是否需要停止重连、是否需要提示排队。
+
+---
+
+## 3. Store 升级：幂等 + cursor 历史 + 7 日窗口
+
+关键目标：
+
+- `clientMessageId` 幂等：防止重复创建
+- cursor 历史：支持 `before=<ISO>` 拉更旧的消息，并返回 `has_more`
+- 7 日窗口：客户读取历史时强制 `createdAt >= now-7d`
+
+**文件：`src/chat/store.ts`（完整替换）**
+
+```ts
+import crypto from 'crypto';
+import type { Conversation, Message, MessageType, SenderType } from './types';
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function newId(prefix: string) {
+  const uuid = (crypto as any).randomUUID?.();
+  return `${prefix}_${typeof uuid === 'string' ? uuid : crypto.randomBytes(16).toString('hex')}`;
+}
+
+export type ListMessagesPageParams = {
+  conversationId: string;
+  limit: number;
+  offset?: number;
+  before?: string;
+  cutoffIso?: string;
+};
+
+export type ListMessagesPageResult = {
+  messages: Message[];
+  hasMore: boolean;
+};
+
+export class ChatStore {
+  private conversationsById = new Map<string, Conversation>();
+  private activeConversationIdByCustomerId = new Map<number, string>();
+  private messagesByConversationId = new Map<string, Message[]>();
+  private messagesByConversationClientId = new Map<string, Map<string, Message>>();
+
+  getConversation(conversationId: string): Conversation | null {
+    return this.conversationsById.get(conversationId) ?? null;
+  }
+
+  listConversations(): Conversation[] {
+    return Array.from(this.conversationsById.values()).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  }
+
+  getOrCreateActiveConversation(customerId: number): { conversation: Conversation; isNew: boolean } {
+    const activeId = this.activeConversationIdByCustomerId.get(customerId);
+    if (activeId) {
+      const existing = this.conversationsById.get(activeId);
+      if (existing && existing.status !== 'closed') return { conversation: existing, isNew: false };
+    }
+
+    const now = nowIso();
+    const conversation: Conversation = {
+      id: newId('c'),
+      customerId,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+      lastMessageAt: null,
+    };
+    this.conversationsById.set(conversation.id, conversation);
+    this.activeConversationIdByCustomerId.set(customerId, conversation.id);
+    this.messagesByConversationId.set(conversation.id, []);
+    return { conversation, isNew: true };
+  }
+
+  createMessage(params: {
+    conversationId: string;
+    senderType: SenderType;
+    senderId: number | null;
+    type: MessageType;
+    body?: string | null;
+    fileUrl?: string | null;
+    thumbnailUrl?: string | null;
+    clientMessageId?: string | null;
+  }): { message: Message; isNew: boolean } {
+    const conversation = this.getConversation(params.conversationId);
+    if (!conversation) throw new Error('conversation_not_found');
+
+    const clientMessageId = params.clientMessageId ?? null;
+    if (clientMessageId) {
+      const idx = this.messagesByConversationClientId.get(params.conversationId) ?? new Map<string, Message>();
+      const existing = idx.get(clientMessageId);
+      if (existing) return { message: existing, isNew: false };
+    }
+
+    const msg: Message = {
+      id: newId('m'),
+      conversationId: params.conversationId,
+      senderType: params.senderType,
+      senderId: params.senderId,
+      type: params.type,
+      body: params.type === 'text' ? (params.body ?? null) : null,
+      fileUrl: params.type === 'image' ? (params.fileUrl ?? null) : null,
+      thumbnailUrl: params.type === 'image' ? (params.thumbnailUrl ?? null) : null,
+      clientMessageId,
+      createdAt: nowIso(),
+    };
+
+    const list = this.messagesByConversationId.get(params.conversationId) ?? [];
+    list.push(msg);
+    this.messagesByConversationId.set(params.conversationId, list);
+
+    if (clientMessageId) {
+      const idx = this.messagesByConversationClientId.get(params.conversationId) ?? new Map<string, Message>();
+      idx.set(clientMessageId, msg);
+      this.messagesByConversationClientId.set(params.conversationId, idx);
+    }
+
+    conversation.updatedAt = msg.createdAt;
+    conversation.lastMessageAt = msg.createdAt;
+    if (params.senderType === 'agent' && conversation.status !== 'closed') conversation.status = 'open';
+    this.conversationsById.set(conversation.id, conversation);
+
+    return { message: msg, isNew: true };
+  }
+
+  listMessagesPage(params: ListMessagesPageParams): ListMessagesPageResult {
+    const take = Math.min(Math.max(1, Number(params.limit || 50)), 100);
+    const listAll = this.messagesByConversationId.get(params.conversationId) ?? [];
+
+    const cutoffIso = typeof params.cutoffIso === 'string' && params.cutoffIso ? params.cutoffIso : '';
+    const list = cutoffIso ? listAll.filter((m) => m.createdAt >= cutoffIso) : listAll;
+
+    const before = typeof params.before === 'string' ? params.before.trim() : '';
+    if (before) {
+      const idx = list.findIndex((m) => m.createdAt >= before);
+      const end = idx === -1 ? list.length : idx;
+      const start = Math.max(0, end - take);
+      const page = list.slice(start, end);
+      return { messages: page, hasMore: start > 0 };
+    }
+
+    const offset = Math.max(0, Number(params.offset || 0));
+    const page = list.slice(offset, offset + take);
+    return { messages: page, hasMore: offset + take < list.length };
+  }
+}
+```
+
+---
+
+## 4. 限流器：把“滥用”从 WS 层拦住
+
+**文件：`src/ws/rateLimit.ts`**
+
+```ts
+export type RateLimitParams = { limit: number; windowMs: number };
+export type RateLimitResult = { allowed: boolean; retryAfterMs: number };
+
+export class InMemoryRateLimiter {
+  private buckets = new Map<string, { windowStartMs: number; count: number }>();
+
+  consume(key: string, params: RateLimitParams, nowMs = Date.now()): RateLimitResult {
+    const limit = Math.max(1, Math.floor(params.limit));
+    const windowMs = Math.max(1, Math.floor(params.windowMs));
+
+    const existing = this.buckets.get(key);
+    if (!existing || nowMs - existing.windowStartMs >= windowMs) {
+      this.buckets.set(key, { windowStartMs: nowMs, count: 1 });
+      return { allowed: true, retryAfterMs: 0 };
+    }
+
+    existing.count += 1;
+    if (existing.count <= limit) return { allowed: true, retryAfterMs: 0 };
+
+    const retryAfterMs = Math.max(0, existing.windowStartMs + windowMs - nowMs);
+    return { allowed: false, retryAfterMs };
+  }
+}
+```
+
+---
+
+## 5. FIFO 队列：客户鉴权排队（单实例内存版 + TTL）
+
+注意：这是 **单实例** 才能保证顺序的实现。TTL 是为了避免“队头用户不重试导致队列卡死”。
+
+**文件：`src/ws/queue.ts`**
+
+```ts
+import crypto from 'crypto';
+
+export type QueueEntry = {
+  ticket: string;
+  userId: number;
+  enqueuedAtMs: number;
+  lastSeenAtMs: number;
+};
+
+export type EnqueueResult =
+  | { ok: true; entry: QueueEntry; position: number; isNew: boolean }
+  | { ok: false; code: 'FULL' };
+
+export class ChatWsAuthQueue {
+  private queue: QueueEntry[] = [];
+  private byUserId = new Map<number, QueueEntry>();
+
+  constructor(private params: { ttlMs: number; maxSize: number }) {}
+
+  private createTicket(): string {
+    const uuid = (crypto as any).randomUUID?.();
+    return typeof uuid === 'string' ? uuid : crypto.randomBytes(16).toString('hex');
+  }
+
+  private prune(nowMs: number) {
+    if (this.queue.length === 0) return;
+    const ttlMs = Math.max(1, Math.floor(this.params.ttlMs));
+    const next: QueueEntry[] = [];
+    for (const entry of this.queue) {
+      if (nowMs - entry.lastSeenAtMs > ttlMs) {
+        this.byUserId.delete(entry.userId);
+        continue;
+      }
+      next.push(entry);
+    }
+    this.queue = next;
+  }
+
+  getHead(nowMs = Date.now()): QueueEntry | null {
+    this.prune(nowMs);
+    return this.queue[0] ?? null;
+  }
+
+  enqueue(userId: number, nowMs = Date.now()): EnqueueResult {
+    this.prune(nowMs);
+
+    const existing = this.byUserId.get(userId);
+    if (existing) {
+      existing.lastSeenAtMs = nowMs;
+      const idx = this.queue.findIndex((e) => e.userId === userId);
+      return { ok: true, entry: existing, position: idx === -1 ? 0 : idx + 1, isNew: false };
+    }
+
+    const maxSize = Math.max(1, Math.floor(this.params.maxSize));
+    if (this.queue.length >= maxSize) return { ok: false, code: 'FULL' };
+
+    const entry: QueueEntry = { ticket: this.createTicket(), userId, enqueuedAtMs: nowMs, lastSeenAtMs: nowMs };
+    this.queue.push(entry);
+    this.byUserId.set(userId, entry);
+    return { ok: true, entry, position: this.queue.length, isNew: true };
+  }
+
+  tryDequeueHead(userId: number, nowMs = Date.now()): boolean {
+    this.prune(nowMs);
+    const head = this.queue[0];
+    if (!head || head.userId !== userId) return false;
+    this.queue.shift();
+    this.byUserId.delete(userId);
+    return true;
+  }
+}
+```
+
+---
+
+## 6. WS server：落地心跳、限流、幂等、7 日窗口、100 上限排队
+
+这里是本篇最关键的文件：**所有规则都在 WS 层可检查地生效**。
+
+你可以通过环境变量调参：
+
+- `CHAT_WS_MAX_ACTIVE_CONNECTIONS`（默认 `100`）
+- `CHAT_WS_MAX_ACTIVE_AGENTS`（默认 `1`）
+- `CHAT_WS_MAX_ACTIVE_CUSTOMERS`（默认 `maxTotal - maxAgents`，且会被 clamp）
+- `CHAT_WS_QUEUE_TTL_MS`（默认 `60000`）
+- `CHAT_WS_QUEUE_MAX_SIZE`（默认 `10000`）
+- `CHAT_WS_QUEUE_RETRY_AFTER_MS`（默认 `2000`）
+
+**文件：`src/ws/server.ts`（完整替换）**
+
+```ts
+import { WebSocketServer, WebSocket } from 'ws';
+import type { IncomingMessage } from 'http';
+import type { ClientToServer, ConversationDTO, MessageDTO, ServerToClient, UserDTO } from './protocol';
+import { loadUser, verifyToken } from './auth';
+import type { Conversation, Message } from '../chat/types';
+import { ChatStore } from '../chat/store';
+import { InMemoryRateLimiter } from './rateLimit';
+import { ChatWsAuthQueue } from './queue';
+
+type ClientState = {
+  ws: WebSocket;
+  authenticated: boolean;
+  user: UserDTO | null;
+  role: 'customer' | 'agent' | null;
+  subscribedConversationIds: Set<string>;
+  processing: Promise<void>;
+};
+
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function send(ws: WebSocket, payload: ServerToClient) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify(payload));
+  } catch {
+    // ignore
+  }
+}
+
+function sendError(
+  ws: WebSocket,
+  message: string,
+  code: any = 'BAD_REQUEST',
+  extra: Record<string, unknown> = {}
+) {
+  send(ws, { type: 'error', code, message, ...(extra as any) });
+}
+
+function toConversationDTO(c: Conversation): ConversationDTO {
+  return {
+    id: c.id,
+    customerId: c.customerId,
+    status: c.status,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    lastMessageAt: c.lastMessageAt,
+  };
+}
+
+function toMessageDTO(m: Message): MessageDTO {
+  return {
+    id: m.id,
+    conversationId: m.conversationId,
+    senderType: m.senderType,
+    senderId: m.senderId,
+    type: m.type,
+    body: m.body,
+    fileUrl: m.fileUrl,
+    thumbnailUrl: m.thumbnailUrl,
+    clientMessageId: m.clientMessageId,
+    createdAt: m.createdAt,
+  };
+}
+
+export function createChatWsServer(params: { jwtSecret: string }) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1_000_000 });
+
+  const store = new ChatStore();
+  const limiter = new InMemoryRateLimiter();
+
+  const wsToState = new Map<WebSocket, ClientState>();
+  const subscribersByConversationId = new Map<string, Set<WebSocket>>();
+
+  const agentSockets = new Set<WebSocket>();
+  const customerSockets = new Set<WebSocket>();
+  const reservedCustomerSockets = new Set<WebSocket>();
+
+  const maxTotalActive = Math.max(1, Math.floor(Number(process.env.CHAT_WS_MAX_ACTIVE_CONNECTIONS || 100)));
+  const maxAgents = Math.max(1, Math.floor(Number(process.env.CHAT_WS_MAX_ACTIVE_AGENTS || 1)));
+  const maxCustomersRaw = Math.floor(Number(process.env.CHAT_WS_MAX_ACTIVE_CUSTOMERS || maxTotalActive - maxAgents));
+  const maxCustomersCap = Math.max(0, maxTotalActive - maxAgents);
+  const maxCustomers = Math.max(0, Math.min(maxCustomersCap, maxCustomersRaw));
+
+  const queueTtlMs = Math.max(5_000, Math.floor(Number(process.env.CHAT_WS_QUEUE_TTL_MS || 60_000)));
+  const queueMaxSize = Math.max(100, Math.floor(Number(process.env.CHAT_WS_QUEUE_MAX_SIZE || 10_000)));
+  const queueRetryAfterMs = Math.max(250, Math.floor(Number(process.env.CHAT_WS_QUEUE_RETRY_AFTER_MS || 2_000)));
+  const authQueue = new ChatWsAuthQueue({ ttlMs: queueTtlMs, maxSize: queueMaxSize });
+
+  const heartbeatIntervalMs = 30_000;
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      const anyWs = ws as any;
+      if (anyWs.__isAlive === false) {
+        try {
+          ws.terminate();
+        } catch {
+          // ignore
+        }
+        continue;
+      }
+      anyWs.__isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        // ignore
+      }
+    }
+  }, heartbeatIntervalMs);
+
+  wss.on('close', () => clearInterval(heartbeat));
+
+  function activeCustomerCount() {
+    return customerSockets.size;
+  }
+
+  function reservedCustomerCount() {
+    return reservedCustomerSockets.size;
+  }
+
+  function effectiveCustomerCount() {
+    return activeCustomerCount() + reservedCustomerCount();
+  }
+
+  function isCapacityAvailableForCustomer() {
+    return effectiveCustomerCount() < maxCustomers;
+  }
+
+  function subscribe(ws: WebSocket, conversationId: string) {
+    const state = wsToState.get(ws);
+    if (!state) return;
+    if (!subscribersByConversationId.has(conversationId)) subscribersByConversationId.set(conversationId, new Set());
+    subscribersByConversationId.get(conversationId)!.add(ws);
+    state.subscribedConversationIds.add(conversationId);
+  }
+
+  function unsubscribeAll(ws: WebSocket) {
+    const state = wsToState.get(ws);
+    if (!state) return;
+    for (const conversationId of state.subscribedConversationIds) {
+      const set = subscribersByConversationId.get(conversationId);
+      if (!set) continue;
+      set.delete(ws);
+      if (set.size === 0) subscribersByConversationId.delete(conversationId);
+    }
+    state.subscribedConversationIds.clear();
+  }
+
+  function broadcastToConversation(conversationId: string, payload: ServerToClient) {
+    const set = subscribersByConversationId.get(conversationId);
+    if (!set) return;
+    for (const s of set) send(s, payload);
+  }
+
+  function broadcastToAgents(payload: ServerToClient) {
+    for (const ws of agentSockets) send(ws, payload);
+  }
+
+  function consumeRateLimit(state: ClientState, action: string, params: { limit: number; windowMs: number }) {
+    if (!state.user || !state.role) return null;
+    return limiter.consume(`ws:${state.role}:${state.user.id}:${action}`, params);
+  }
+
+  async function handleAuth(ws: WebSocket, token: string) {
+    const payload = verifyToken({ secret: params.jwtSecret, token });
+    if (!payload) {
+      sendError(ws, 'token 无效或已过期', 'UNAUTHORIZED');
+      ws.close();
+      return;
+    }
+
+    const state = wsToState.get(ws);
+    if (!state) return;
+
+    const user = loadUser(payload);
+
+    // 客服永远可连：超过 maxAgents 时替换旧客服连接（不踢客户）
+    if (user.role === 'agent') {
+      if (agentSockets.size >= maxAgents) {
+        for (const existing of Array.from(agentSockets)) {
+          if (existing === ws) continue;
+          agentSockets.delete(existing);
+          unsubscribeAll(existing);
+          sendError(existing, '客服连接已被新的会话替换', 'REPLACED');
+          try {
+            existing.close();
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    // 客户排队（FIFO）：满员或队列非空时，只允许队头进入
+    if (user.role === 'customer') {
+      const nowMs = Date.now();
+
+      const replyQueued = () => {
+        const enq = authQueue.enqueue(user.id, nowMs);
+        if (!enq.ok) {
+          sendError(ws, '排队人数过多，请稍后再试', 'SERVER_BUSY', { retry_after_ms: queueRetryAfterMs });
+          ws.close(1013, 'queue_full');
+          return;
+        }
+        sendError(ws, '咨询人数较多，已进入排队', 'QUEUED', {
+          queue_ticket: enq.entry.ticket,
+          queue_position: enq.position,
+          retry_after_ms: queueRetryAfterMs,
+        });
+        ws.close(1013, 'queued');
+      };
+
+      const head = authQueue.getHead(nowMs);
+      if (head) {
+        if (head.userId !== user.id) return replyQueued();
+        if (!isCapacityAvailableForCustomer()) return replyQueued();
+        reservedCustomerSockets.add(ws);
+        authQueue.tryDequeueHead(user.id, nowMs);
+      } else {
+        if (!isCapacityAvailableForCustomer()) return replyQueued();
+        reservedCustomerSockets.add(ws);
+      }
+    }
+
+    state.user = user;
+    state.role = user.role;
+    state.authenticated = true;
+
+    if (user.role === 'customer') {
+      const { conversation, isNew } = store.getOrCreateActiveConversation(user.id);
+      subscribe(ws, conversation.id);
+      reservedCustomerSockets.delete(ws);
+      customerSockets.add(ws);
+      send(ws, { type: 'auth_ok', user, conversation: toConversationDTO(conversation) });
+      if (isNew) broadcastToAgents({ type: 'conversation', conversation: toConversationDTO(conversation) });
+      return;
+    }
+
+    agentSockets.add(ws);
+    reservedCustomerSockets.delete(ws);
+    send(ws, { type: 'auth_ok', user });
+    // 让客服端“无论先开哪个页面”都能看到已有会话
+    for (const c of store.listConversations()) send(ws, { type: 'conversation', conversation: toConversationDTO(c) });
+  }
+
+  async function handleSubscribe(ws: WebSocket, conversationId: string) {
+    const state = wsToState.get(ws);
+    if (!state || !state.authenticated || !state.user || !state.role) return sendError(ws, '未认证', 'UNAUTHORIZED');
+
+    const rl = consumeRateLimit(state, 'subscribe', { limit: 120, windowMs: 60_000 });
+    if (rl && !rl.allowed) return sendError(ws, '请求过于频繁，请稍后重试', 'RATE_LIMITED', { retry_after_ms: rl.retryAfterMs });
+
+    if (state.role !== 'agent') return sendError(ws, '仅客服可订阅会话', 'FORBIDDEN');
+    const conv = store.getConversation(conversationId);
+    if (!conv) return sendError(ws, '会话不存在', 'NOT_FOUND');
+
+    subscribe(ws, conversationId);
+    send(ws, { type: 'conversation', conversation: toConversationDTO(conv) });
+  }
+
+  async function handleHistory(
+    ws: WebSocket,
+    conversationId: string,
+    limit: number,
+    offset: number,
+    before?: string
+  ) {
+    const state = wsToState.get(ws);
+    if (!state || !state.authenticated || !state.user || !state.role) return sendError(ws, '未认证', 'UNAUTHORIZED');
+
+    const rl = consumeRateLimit(state, 'history', { limit: 240, windowMs: 60_000 });
+    if (rl && !rl.allowed) return sendError(ws, '请求过于频繁，请稍后重试', 'RATE_LIMITED', { retry_after_ms: rl.retryAfterMs });
+
+    const conv = store.getConversation(conversationId);
+    if (!conv) return sendError(ws, '会话不存在', 'NOT_FOUND');
+    if (state.role === 'customer' && conv.customerId !== state.user.id) return sendError(ws, '无权限访问该会话', 'FORBIDDEN');
+
+    const cutoffIso =
+      state.role === 'customer' ? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() : undefined;
+
+    const take = Math.min(Math.max(1, limit || 50), 100);
+    const cursor = typeof before === 'string' ? before.trim() : '';
+    const page = store.listMessagesPage({ conversationId, limit: take, offset, before: cursor || undefined, cutoffIso });
+
+    send(ws, {
+      type: 'history',
+      conversationId,
+      messages: page.messages.map(toMessageDTO),
+      meta: { has_more: page.hasMore },
+    });
+  }
+
+  async function handleMessage(ws: WebSocket, msg: Extract<ClientToServer, { type: 'message' }>) {
+    const state = wsToState.get(ws);
+    if (!state || !state.authenticated || !state.user || !state.role) return sendError(ws, '未认证', 'UNAUTHORIZED');
+
+    const clientMessageId = typeof msg.clientMessageId === 'string' ? msg.clientMessageId : '';
+
+    const rl = consumeRateLimit(state, 'message', { limit: 60, windowMs: 60_000 });
+    if (rl && !rl.allowed)
+      return sendError(ws, '发送过于频繁，请稍后重试', 'RATE_LIMITED', {
+        retry_after_ms: rl.retryAfterMs,
+        ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
+      });
+
+    const conversationId = String(msg.conversationId || '');
+    if (!conversationId) return sendError(ws, 'conversationId 不能为空', 'BAD_REQUEST');
+
+    const conv = store.getConversation(conversationId);
+    if (!conv) return sendError(ws, '会话不存在', 'NOT_FOUND');
+    if (state.role === 'customer' && conv.customerId !== state.user.id) return sendError(ws, '无权限访问该会话', 'FORBIDDEN');
+
+    const messageType = msg.messageType === 'image' ? 'image' : 'text';
+    const textBody = typeof msg.body === 'string' ? msg.body.trim() : '';
+    const fileUrl = typeof msg.fileUrl === 'string' ? msg.fileUrl.trim() : '';
+    const thumbnailUrl = typeof msg.thumbnailUrl === 'string' ? msg.thumbnailUrl.trim() : '';
+
+    if (messageType === 'text') {
+      if (!textBody) return sendError(ws, '消息内容不能为空', 'BAD_REQUEST', clientMessageId ? { client_message_id: clientMessageId } : {});
+      if (textBody.length > 2000) return sendError(ws, '消息过长', 'BAD_REQUEST', clientMessageId ? { client_message_id: clientMessageId } : {});
+    }
+    if (messageType === 'image' && !fileUrl)
+      return sendError(ws, '图片 URL 不能为空', 'BAD_REQUEST', clientMessageId ? { client_message_id: clientMessageId } : {});
+
+    try {
+      const created = store.createMessage({
+        conversationId,
+        senderType: state.role,
+        senderId: state.user.id,
+        type: messageType,
+        body: textBody,
+        fileUrl,
+        thumbnailUrl: thumbnailUrl || null,
+        clientMessageId: clientMessageId || null,
+      });
+
+      const messageDto = toMessageDTO(created.message);
+      if (created.isNew) {
+        broadcastToConversation(conversationId, { type: 'message', message: messageDto });
+      } else {
+        // 幂等重试：只回给发送者作为 ACK，避免对其他订阅者产生重复 UI
+        send(ws, { type: 'message', message: messageDto });
+      }
+
+      broadcastToAgents({ type: 'conversation', conversation: toConversationDTO(store.getConversation(conversationId)!) });
+    } catch (err) {
+      sendError(ws, '发送失败', 'INTERNAL_ERROR', clientMessageId ? { client_message_id: clientMessageId } : {});
+    }
+  }
+
+  async function processIncomingMessage(ws: WebSocket, data: any) {
+    const text = typeof data === 'string' ? data : data.toString();
+    const parsed = safeJsonParse(text) as any;
+    if (!parsed || typeof parsed.type !== 'string') return sendError(ws, '消息格式错误', 'BAD_REQUEST');
+
+    const type = parsed.type as ClientToServer['type'];
+
+    if (type === 'auth') {
+      const token = typeof parsed.token === 'string' ? parsed.token : '';
+      if (!token) return sendError(ws, 'token 不能为空', 'BAD_REQUEST');
+      await handleAuth(ws, token);
+      return;
+    }
+
+    const state = wsToState.get(ws);
+    if (!state || !state.authenticated) return sendError(ws, '未认证', 'UNAUTHORIZED');
+
+    if (type === 'ping') return send(ws, { type: 'pong', ts: Date.now() });
+    if (type === 'subscribe') return handleSubscribe(ws, String(parsed.conversationId || ''));
+    if (type === 'history')
+      return handleHistory(
+        ws,
+        String(parsed.conversationId || ''),
+        Number(parsed.limit || 50),
+        Number(parsed.offset || 0),
+        typeof parsed.before === 'string' ? parsed.before : ''
+      );
+    if (type === 'message') return handleMessage(ws, parsed as any);
+
+    sendError(ws, '未知消息类型', 'BAD_REQUEST');
+  }
+
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
+    (ws as any).__isAlive = true;
+    ws.on('pong', () => {
+      (ws as any).__isAlive = true;
+    });
+
+    const state: ClientState = {
+      ws,
+      authenticated: false,
+      user: null,
+      role: null,
+      subscribedConversationIds: new Set(),
+      processing: Promise.resolve(),
+    };
+    wsToState.set(ws, state);
+    send(ws, { type: 'hello', required: ['auth'] });
+
+    ws.on('message', (data) => {
+      const s = wsToState.get(ws);
+      if (!s) return;
+      s.processing = s.processing
+        .then(() => processIncomingMessage(ws, data))
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error('[ws] processing error', err);
+          sendError(ws, '服务器异常', 'INTERNAL_ERROR');
+        });
+    });
+
+    const cleanup = () => {
+      unsubscribeAll(ws);
+      agentSockets.delete(ws);
+      customerSockets.delete(ws);
+      reservedCustomerSockets.delete(ws);
+      wsToState.delete(ws);
+    };
+
+    ws.on('close', cleanup);
+    ws.on('error', cleanup);
+  });
+
+  return wss;
+}
+```
+
+---
+
+## 7. 客户端硬化：排队提示 + 自动重连（客服被替换时停止）
+
+我们把第二部的“内联脚本”收敛成一个可复用的 `chatClient.js`。
+
+### 7.1 `public/chatClient.js`（新增）
+
+```js
+export async function devLogin(role, userId) {
+  const resp = await fetch('/api/dev/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ role, userId }),
+  });
+  const data = await resp.json();
+  return data.token;
+}
+
+export async function uploadImage(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const resp = await fetch('/api/uploads', { method: 'POST', body: fd });
+  if (!resp.ok) throw new Error('upload failed');
+  return resp.json();
+}
+
+function getChatWsUrl() {
+  const base = location.origin.replace(/^http/, 'ws');
+  return `${base}/ws/chat`;
+}
+
+export function connectChatWebSocket(options) {
+  const pingIntervalMs = options.pingIntervalMs ?? 20_000;
+  const pongTimeoutMs = options.pongTimeoutMs ?? 8_000;
+  const reconnectMinDelayMs = options.reconnectMinDelayMs ?? 500;
+  const reconnectMaxDelayMs = options.reconnectMaxDelayMs ?? 30_000;
+
+  let ws = null;
+  let authenticated = false;
+  let manualClose = false;
+  let allowReconnect = true;
+  let reconnectAttempt = 0;
+
+  const outbox = [];
+  let nextReconnectDelayMs = null;
+  let reconnectTimer = null;
+  let pingTimer = null;
+  let pongTimer = null;
+
+  const clearTimers = () => {
+    if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+    if (pingTimer != null) window.clearInterval(pingTimer);
+    if (pongTimer != null) window.clearTimeout(pongTimer);
+    reconnectTimer = null;
+    pingTimer = null;
+    pongTimer = null;
+  };
+
+  const setStatus = (s) => options.onStatus?.(s);
+
+  const flushOutbox = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated) return;
+    while (outbox.length) ws.send(outbox.shift());
+  };
+
+  const sendJson = (payload) => {
+    const text = JSON.stringify(payload);
+    if (ws && ws.readyState === WebSocket.OPEN && authenticated) {
+      ws.send(text);
+      return;
+    }
+    outbox.push(text);
+  };
+
+  const startHeartbeat = () => {
+    if (pingIntervalMs <= 0) return;
+    if (pingTimer != null) window.clearInterval(pingTimer);
+    pingTimer = window.setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated) return;
+      try {
+        ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+      } catch {
+        // ignore
+      }
+      if (pongTimer != null) window.clearTimeout(pongTimer);
+      pongTimer = window.setTimeout(() => {
+        try { ws?.close(); } catch { /* ignore */ }
+      }, pongTimeoutMs);
+    }, pingIntervalMs);
+  };
+
+  const scheduleReconnect = () => {
+    if (manualClose || !allowReconnect) return;
+    reconnectAttempt += 1;
+    const baseDelay =
+      nextReconnectDelayMs != null
+        ? Math.max(250, Math.floor(nextReconnectDelayMs))
+        : Math.min(reconnectMaxDelayMs, reconnectMinDelayMs * Math.pow(2, reconnectAttempt - 1));
+    nextReconnectDelayMs = null;
+    const jitter = Math.floor(Math.random() * 250);
+    const delay = baseDelay + jitter;
+    setStatus('reconnecting');
+    reconnectTimer = window.setTimeout(() => connect(true), delay);
+  };
+
+  const connect = (isReconnect) => {
+    if (manualClose) return;
+    clearTimers();
+    authenticated = false;
+    setStatus(isReconnect ? 'reconnecting' : 'connecting');
+
+    ws = new WebSocket(getChatWsUrl());
+
+    ws.addEventListener('open', () => {
+      if (manualClose) return;
+      try {
+        const ticket = options.getQueueTicket?.();
+        ws.send(JSON.stringify({ type: 'auth', token: options.token, ...(ticket ? { queue_ticket: ticket } : {}) }));
+      } catch {
+        // ignore
+      }
+    });
+
+    ws.addEventListener('message', (evt) => {
+      if (manualClose) return;
+      let msg = null;
+      try { msg = JSON.parse(evt.data); } catch { /* ignore */ }
+      if (!msg || typeof msg.type !== 'string') return;
+
+      if (msg.type === 'pong') {
+        if (pongTimer != null) window.clearTimeout(pongTimer);
+        pongTimer = null;
+        return;
+      }
+
+      if (msg.type === 'auth_ok') {
+        authenticated = true;
+        reconnectAttempt = 0;
+        options.setQueueTicket?.(null);
+        setStatus('connected');
+        flushOutbox();
+        startHeartbeat();
+      }
+
+      // 连接级错误：无论是否已 auth_ok，都应停止自动重连（避免“替换-重连”互相打架）
+      if (msg.type === 'error' && msg.code === 'REPLACED') {
+        allowReconnect = false;
+        setStatus('disconnected');
+      }
+
+      if (msg.type === 'error' && !authenticated) {
+        if (msg.code === 'UNAUTHORIZED' || msg.code === 'FORBIDDEN') {
+          allowReconnect = false;
+          setStatus('disconnected');
+        }
+        if (msg.code === 'QUEUED' && typeof msg.queue_ticket === 'string' && msg.queue_ticket) {
+          options.setQueueTicket?.(msg.queue_ticket);
+        }
+        if ((msg.code === 'QUEUED' || msg.code === 'SERVER_BUSY') && typeof msg.retry_after_ms === 'number') {
+          nextReconnectDelayMs = msg.retry_after_ms;
+        }
+      }
+
+      options.onEvent?.(msg);
+    });
+
+    ws.addEventListener('close', () => {
+      clearTimers();
+      authenticated = false;
+      if (manualClose) return setStatus('disconnected');
+      if (!allowReconnect) return setStatus('disconnected');
+      scheduleReconnect();
+    });
+  };
+
+  connect(false);
+
+  return {
+    sendText: ({ conversationId, body, clientMessageId }) =>
+      sendJson({ type: 'message', conversationId, messageType: 'text', body, clientMessageId }),
+    sendImage: ({ conversationId, fileUrl, thumbnailUrl, clientMessageId }) =>
+      sendJson({ type: 'message', conversationId, messageType: 'image', fileUrl, thumbnailUrl, clientMessageId }),
+    requestHistory: ({ conversationId, limit = 50, offset = 0, before }) =>
+      sendJson({ type: 'history', conversationId, limit, offset, before }),
+    subscribe: ({ conversationId }) => sendJson({ type: 'subscribe', conversationId }),
+    close: () => {
+      manualClose = true;
+      allowReconnect = false;
+      clearTimers();
+      try { ws?.close(); } catch { /* ignore */ }
+    },
+  };
+}
+```
+
+### 7.2 `public/customer.html`（替换为模块化版本）
+
+```html
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Customer Chat</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto; margin: 0; padding: 16px; background: #0b0c10; color: #e6e6e6; }
+      .row { display: flex; gap: 8px; }
+      .box { border: 1px solid #2a2f3a; border-radius: 12px; padding: 12px; background: #12141b; }
+      #log { height: 360px; overflow: auto; }
+      input, button { padding: 10px 12px; border-radius: 10px; border: 1px solid #2a2f3a; background: #0b0c10; color: #e6e6e6; }
+      button { cursor: pointer; }
+      img { max-width: 240px; border-radius: 10px; display: block; margin-top: 6px; }
+      .meta { color: #9aa4b2; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h2>Customer</h2>
+    <div class="meta" id="status">connecting</div>
+    <div class="meta" id="hint"></div>
+
+    <div id="log" class="box" style="margin-top: 10px"></div>
+
+    <div class="row" style="margin-top: 10px">
+      <input id="text" style="flex: 1" placeholder="输入消息..." />
+      <button id="send">发送</button>
+    </div>
+    <div class="row" style="margin-top: 10px; align-items: center">
+      <input id="file" type="file" accept="image/*" />
+      <button id="sendImage">发送图片</button>
+    </div>
+
+    <script type="module">
+      import { devLogin, uploadImage, connectChatWebSocket } from './chatClient.js';
+
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $('status');
+      const hintEl = $('hint');
+      const logEl = $('log');
+      const textEl = $('text');
+      const fileEl = $('file');
+
+      const seen = new Set();
+      let conversationId = null;
+      let token = null;
+
+      const getQueueTicket = () => {
+        try { return localStorage.getItem('chat_ws_queue_ticket'); } catch { return null; }
+      };
+      const setQueueTicket = (v) => {
+        try {
+          if (!v) localStorage.removeItem('chat_ws_queue_ticket');
+          else localStorage.setItem('chat_ws_queue_ticket', v);
+        } catch {}
+      };
+
+      function renderMessage(m) {
+        if (seen.has(m.id)) return;
+        seen.add(m.id);
+        const div = document.createElement('div');
+        div.className = 'box';
+        div.style.marginTop = '8px';
+        div.innerHTML = `<div class="meta">${m.senderType} @ ${m.createdAt}</div>`;
+        if (m.type === 'text') div.innerHTML += `<div>${(m.body || '').replaceAll('<', '&lt;')}</div>`;
+        if (m.type === 'image') {
+          const img = document.createElement('img');
+          img.src = m.thumbnailUrl || m.fileUrl;
+          div.appendChild(img);
+        }
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      token = await devLogin('customer', 1);
+
+      const ws = connectChatWebSocket({
+        token,
+        getQueueTicket,
+        setQueueTicket,
+        onStatus: (s) => (statusEl.textContent = s),
+        onEvent: (evt) => {
+          if (evt.type === 'auth_ok' && evt.conversation) {
+            hintEl.textContent = '';
+            conversationId = evt.conversation.id;
+            ws.requestHistory({ conversationId, limit: 50, offset: 0 });
+          }
+
+          if (evt.type === 'history' && evt.conversationId === conversationId) {
+            evt.messages.forEach(renderMessage);
+          }
+
+          if (evt.type === 'message') renderMessage(evt.message);
+
+          if (evt.type === 'error') {
+            if (evt.code === 'QUEUED') {
+              const pos = typeof evt.queue_position === 'number' && evt.queue_position > 0 ? `第 ${evt.queue_position} 位` : '排队中';
+              hintEl.textContent = `需要排队（${pos}），客户端将自动重试连接`;
+              return;
+            }
+            hintEl.textContent = `${evt.code}: ${evt.message}`;
+          }
+        },
+      });
+
+      $('send').addEventListener('click', () => {
+        const body = (textEl.value || '').trim();
+        if (!body || !conversationId) return;
+        const cmid = `cmid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        ws.sendText({ conversationId, body, clientMessageId: cmid });
+        textEl.value = '';
+      });
+
+      $('sendImage').addEventListener('click', async () => {
+        const f = fileEl.files?.[0];
+        if (!f || !conversationId) return;
+        const uploaded = await uploadImage(f);
+        const cmid = `cmid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        ws.sendImage({ conversationId, fileUrl: uploaded.fileUrl, thumbnailUrl: uploaded.thumbnailUrl, clientMessageId: cmid });
+        fileEl.value = '';
+      });
+    </script>
+  </body>
+</html>
+```
+
+### 7.3 `public/agent.html`（替换为模块化版本）
+
+```html
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Chat</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto; margin: 0; padding: 16px; background: #0b0c10; color: #e6e6e6; }
+      .row { display: flex; gap: 12px; }
+      .box { border: 1px solid #2a2f3a; border-radius: 12px; padding: 12px; background: #12141b; }
+      #log { height: 360px; overflow: auto; }
+      #convs { height: 360px; overflow: auto; }
+      input, button { padding: 10px 12px; border-radius: 10px; border: 1px solid #2a2f3a; background: #0b0c10; color: #e6e6e6; }
+      button { cursor: pointer; }
+      img { max-width: 240px; border-radius: 10px; display: block; margin-top: 6px; }
+      .meta { color: #9aa4b2; font-size: 12px; }
+      .conv { padding: 10px; border: 1px solid #2a2f3a; border-radius: 10px; cursor: pointer; margin-top: 8px; }
+      .conv.active { border-color: #7c8cff; }
+    </style>
+  </head>
+  <body>
+    <h2>Agent</h2>
+    <div class="meta" id="status">connecting</div>
+    <div class="meta" id="hint"></div>
+
+    <div class="row" style="margin-top: 10px">
+      <div class="box" style="width: 320px">
+        <div class="meta">会话列表</div>
+        <div id="convs" class="box" style="margin-top: 10px"></div>
+      </div>
+
+      <div class="box" style="flex: 1">
+        <div class="meta">current: <span id="current">-</span></div>
+        <div id="log" class="box" style="margin-top: 10px"></div>
+        <div class="row" style="margin-top: 10px">
+          <input id="text" style="flex: 1" placeholder="输入消息..." />
+          <button id="send">发送</button>
+        </div>
+        <div class="row" style="margin-top: 10px; align-items: center">
+          <input id="file" type="file" accept="image/*" />
+          <button id="sendImage">发送图片</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      import { devLogin, uploadImage, connectChatWebSocket } from './chatClient.js';
+
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $('status');
+      const hintEl = $('hint');
+      const convsEl = $('convs');
+      const logEl = $('log');
+      const currentEl = $('current');
+      const textEl = $('text');
+      const fileEl = $('file');
+
+      const conversations = new Map();
+      const seen = new Set();
+      let currentConversationId = null;
+
+      function renderConversations() {
+        convsEl.innerHTML = '';
+        for (const c of Array.from(conversations.values()).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))) {
+          const div = document.createElement('div');
+          div.className = 'conv' + (c.id === currentConversationId ? ' active' : '');
+          div.textContent = `${c.id} (customer=${c.customerId}, status=${c.status})`;
+          div.addEventListener('click', () => selectConversation(c.id));
+          convsEl.appendChild(div);
+        }
+      }
+
+      function renderMessage(m) {
+        if (seen.has(m.id)) return;
+        seen.add(m.id);
+        const div = document.createElement('div');
+        div.className = 'box';
+        div.style.marginTop = '8px';
+        div.innerHTML = `<div class="meta">${m.senderType} @ ${m.createdAt}</div>`;
+        if (m.type === 'text') div.innerHTML += `<div>${(m.body || '').replaceAll('<', '&lt;')}</div>`;
+        if (m.type === 'image') {
+          const img = document.createElement('img');
+          img.src = m.thumbnailUrl || m.fileUrl;
+          div.appendChild(img);
+        }
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      const token = await devLogin('agent', 1);
+
+      const ws = connectChatWebSocket({
+        token,
+        onStatus: (s) => (statusEl.textContent = s),
+        onEvent: (evt) => {
+          if (evt.type === 'conversation') {
+            conversations.set(evt.conversation.id, evt.conversation);
+            renderConversations();
+          }
+          if (evt.type === 'history' && evt.conversationId === currentConversationId) {
+            evt.messages.forEach(renderMessage);
+          }
+          if (evt.type === 'message') {
+            if (evt.message.conversationId === currentConversationId) renderMessage(evt.message);
+          }
+          if (evt.type === 'error') {
+            hintEl.textContent = `${evt.code}: ${evt.message}`;
+            if (evt.code === 'REPLACED') hintEl.textContent = '该客服连接已被新的会话替换（已停止自动重连）';
+          }
+        },
+      });
+
+      function selectConversation(conversationId) {
+        currentConversationId = conversationId;
+        currentEl.textContent = conversationId;
+        seen.clear();
+        logEl.innerHTML = '';
+        renderConversations();
+        ws.subscribe({ conversationId });
+        ws.requestHistory({ conversationId, limit: 50, offset: 0 });
+      }
+
+      $('send').addEventListener('click', () => {
+        const body = (textEl.value || '').trim();
+        if (!body || !currentConversationId) return;
+        const cmid = `cmid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        ws.sendText({ conversationId: currentConversationId, body, clientMessageId: cmid });
+        textEl.value = '';
+      });
+
+      $('sendImage').addEventListener('click', async () => {
+        const f = fileEl.files?.[0];
+        if (!f || !currentConversationId) return;
+        const uploaded = await uploadImage(f);
+        const cmid = `cmid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        ws.sendImage({ conversationId: currentConversationId, fileUrl: uploaded.fileUrl, thumbnailUrl: uploaded.thumbnailUrl, clientMessageId: cmid });
+        fileEl.value = '';
+      });
+    </script>
+  </body>
+</html>
+```
+
+---
+
+## 8. 复现：验证“100 上限 + FIFO 排队 + 客服永远可连”
+
+用环境变量跑起来（示例）：
+
+```bash
+CHAT_WS_MAX_ACTIVE_CONNECTIONS=100 \
+CHAT_WS_MAX_ACTIVE_AGENTS=1 \
+npm run dev
+```
+
+然后你可以用浏览器重复打开 `customer.html`（或写脚本批量连）来观察：
+
+- 超过 `maxCustomers = 100 - 1 = 99` 后，客户会收到 `QUEUED` 且连接被 1013 关闭
+- 客户端会按 `retry_after_ms` 自动重试，并显示当前排队位置
+- 此时打开 `agent.html` 仍然可以连接（客服槽位被预留）
+
+如果你希望“100 个客户 + 1 个客服同时在线”，那就把 `CHAT_WS_MAX_ACTIVE_CONNECTIONS` 提升到 `101`（否则在“不踢客户”的前提下无法保证客服永远可连）。
+
+
+连接上限/排队最怕一种情况：**客户端网络断了，但服务端没收到 close**。如果不做心跳，服务端会一直把它算作“在线”，导致新客户永远进不来。
+
+这里用 `ws` 的 ping/pong 帧做服务端主动探测（浏览器会自动回 pong）。
+
+在 `createChatWsServer` 里加一个定时扫描：
+
+**文件：`src/ws/server.ts`（新增心跳扫描）**
+
+```ts
+const heartbeatIntervalMs = 30_000;
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    const anyWs = ws as any;
+    if (anyWs.__isAlive === false) {
+      try { ws.terminate(); } catch { /* ignore */ }
+      continue;
+    }
+    anyWs.__isAlive = false;
+    try { ws.ping(); } catch { /* ignore */ }
+  }
+}, heartbeatIntervalMs);
+
+wss.on('close', () => clearInterval(heartbeat));
+```
+
+并在每个连接上监听 `pong`：
+
+```ts
+ws.on('pong', () => { (ws as any).__isAlive = true; });
+(ws as any).__isAlive = true;
+```
+
+**可检查点**：断网/关浏览器标签后，最多 30s 内服务端会 terminate 掉死连接，从而释放连接槽位。
+
+---
+
+## 2. 限流：把“滥用”从 WS 层拦住
+
+我们用一个最小的滑动窗口限流器（内存版）。它能被验证，但仍然受限于“单实例”前提。
+
+**文件：`src/ws/rateLimit.ts`**
+
+```ts
+export type RateLimitParams = { limit: number; windowMs: number };
+export type RateLimitResult = { allowed: boolean; retryAfterMs: number };
+
+export class InMemoryRateLimiter {
+  private buckets = new Map<string, { windowStartMs: number; count: number }>();
+
+  consume(key: string, params: RateLimitParams, nowMs = Date.now()): RateLimitResult {
+    const limit = Math.max(1, Math.floor(params.limit));
+    const windowMs = Math.max(1, Math.floor(params.windowMs));
+
+    const existing = this.buckets.get(key);
+    if (!existing || nowMs - existing.windowStartMs >= windowMs) {
+      this.buckets.set(key, { windowStartMs: nowMs, count: 1 });
+      return { allowed: true, retryAfterMs: 0 };
+    }
+
+    existing.count += 1;
+    if (existing.count <= limit) return { allowed: true, retryAfterMs: 0 };
+
+    const retryAfterMs = Math.max(0, existing.windowStartMs + windowMs - nowMs);
+    return { allowed: false, retryAfterMs };
+  }
+}
+```
+
+在 WS 处理函数里使用（示例：限制 message）：
+
+```ts
+const rl = limiter.consume(`ws:${state.role}:${state.user.id}:message`, { limit: 60, windowMs: 60_000 });
+if (!rl.allowed) return sendError(ws, '发送过于频繁，请稍后重试', 'RATE_LIMITED', { retry_after_ms: rl.retryAfterMs });
+```
+
+---
+
+## 3. 幂等：`clientMessageId` 是“生产级聊天”的底线
+
+WS 重连、网络抖动、用户狂点发送按钮，都会导致重复发送。
+
+**可运行的解决方案**：要求客户端在发送消息时携带 `clientMessageId`，服务端对 `(conversationId, clientMessageId)` 做幂等。
+
+在 `ChatStore` 里加一个索引：
+
+**文件：`src/chat/store.ts`（新增幂等索引 + 查重）**
+
+```ts
+private messagesByConversationClientId = new Map<string, Map<string, Message>>();
+
+createMessage(...) {
+  // ...
+  if (params.clientMessageId) {
+    const idx = this.messagesByConversationClientId.get(params.conversationId) ?? new Map();
+    const existing = idx.get(params.clientMessageId);
+    if (existing) return existing;
+    idx.set(params.clientMessageId, msg);
+    this.messagesByConversationClientId.set(params.conversationId, idx);
+  }
+  // ...
+}
+```
+
+然后在 WS message handler 里：如果返回的是“已存在消息”，你可以直接广播它，让客户端把乐观消息“对齐”。
+
+---
+
+## 4. 历史窗口：客户只能读最近 7 天
+
+这是一个典型“稳定性 + 成本”优化：历史越长，拉取越慢，DB 压力越大，消息体也越大。
+
+做法很简单：在 history 查询处加一个 cutoff。
+
+**示例逻辑（伪代码）**：
+
+```ts
+const cutoffIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+if (state.role === 'customer') {
+  messages = messages.filter((m) => m.createdAt >= cutoffIso);
+}
+```
+
+**可检查点**：把本地机器时间改到未来，再发消息/拉历史，仍然能看到 cutoff 生效（但注意这不是安全策略，只是业务限制）。
+
+---
+
+## 5. 连接上限 100 + FIFO 排队（客户）+ 客服永远可连
+
+### 5.1 先把约束讲清楚（避免逻辑矛盾）
+
+你给的目标是：
+
+- WS 总连接上限为 100
+- 客户超过上限不能直接连，需要排队（按连接时间 FIFO）
+- 不允许随意踢掉已连接客户
+- 客服永远可连
+
+这四条里最容易隐藏的矛盾是：**如果允许 100 个客户占满 100 个连接，同时又不踢客户，那客服就无法连接。**
+
+所以必须二选一（这是可判定的工程事实）：
+
+1. **总连接上限 100 且客服永远可连** → 客户连接上限必须 ≤ 99（预留 1 个客服槽位）
+2. **客户上限 100 且客服永远可连** → 总连接上限必须 ≥ 101
+
+下面的 demo 采用第 1 种：`maxCustomers = maxTotalActive - maxAgents`。
+
+### 5.2 队列实现（单实例内存 FIFO + TTL）
+
+**文件：`src/ws/queue.ts`**
+
+```ts
+import crypto from 'crypto';
+
+export type QueueEntry = {
+  ticket: string;
+  userId: number;
+  enqueuedAtMs: number;
+  lastSeenAtMs: number;
+};
+
+export class AuthQueue {
+  private queue: QueueEntry[] = [];
+  private byUserId = new Map<number, QueueEntry>();
+
+  constructor(private params: { ttlMs: number; maxSize: number }) {}
+
+  private createTicket() {
+    const uuid = (crypto as any).randomUUID?.();
+    return typeof uuid === 'string' ? uuid : crypto.randomBytes(16).toString('hex');
+  }
+
+  private prune(nowMs: number) {
+    const ttlMs = Math.max(1, Math.floor(this.params.ttlMs));
+    const next: QueueEntry[] = [];
+    for (const e of this.queue) {
+      if (nowMs - e.lastSeenAtMs > ttlMs) {
+        this.byUserId.delete(e.userId);
+        continue;
+      }
+      next.push(e);
+    }
+    this.queue = next;
+  }
+
+  getHead(nowMs = Date.now()) {
+    this.prune(nowMs);
+    return this.queue[0] ?? null;
+  }
+
+  enqueue(userId: number, nowMs = Date.now()) {
+    this.prune(nowMs);
+    const existing = this.byUserId.get(userId);
+    if (existing) {
+      existing.lastSeenAtMs = nowMs;
+      const idx = this.queue.findIndex((x) => x.userId === userId);
+      return { ok: true as const, entry: existing, position: idx === -1 ? 0 : idx + 1 };
+    }
+    if (this.queue.length >= Math.max(1, Math.floor(this.params.maxSize))) return { ok: false as const, code: 'FULL' as const };
+    const entry: QueueEntry = { ticket: this.createTicket(), userId, enqueuedAtMs: nowMs, lastSeenAtMs: nowMs };
+    this.queue.push(entry);
+    this.byUserId.set(userId, entry);
+    return { ok: true as const, entry, position: this.queue.length };
+  }
+
+  tryDequeueHead(userId: number, nowMs = Date.now()) {
+    this.prune(nowMs);
+    const head = this.queue[0];
+    if (!head || head.userId !== userId) return false;
+    this.queue.shift();
+    this.byUserId.delete(userId);
+    return true;
+  }
+}
+```
+
+### 5.3 在 WS 鉴权处接入“容量 + 排队”
+
+关键点：
+
+- **队列非空时**：只允许队头进入（即使当前有空位，也要保证 FIFO）
+- **容量不足时**：返回 `QUEUED` 并关闭连接（close code 1013）
+- **客服永远可连**：新客服连接替换旧客服连接（只踢客服，不踢客户）
+- **不超卖**：用 `reservedCustomerSockets` 预占槽位，避免并发通过鉴权导致超过上限
+
+**示例伪代码（结构与实现一一对应）**：
+
+```ts
+const maxTotalActive = Number(process.env.CHAT_WS_MAX_ACTIVE_CONNECTIONS || 100);
+const maxAgents = Number(process.env.CHAT_WS_MAX_ACTIVE_AGENTS || 1);
+const maxCustomers = Math.max(0, maxTotalActive - maxAgents);
+
+if (role === 'agent') {
+  // 超过 maxAgents 时：替换旧客服连接（不踢客户）
+}
+
+if (role === 'customer') {
+  const head = queue.getHead(now);
+  if (head && head.userId !== user.id) return queued();
+  if (effectiveCustomerCount() >= maxCustomers) return queued();
+  reservedCustomerSockets.add(ws);
+  if (head) queue.tryDequeueHead(user.id, now);
+}
+
+// 通过后继续走原有 auth_ok 逻辑
+```
+
+### 5.4 客户端怎么“排队而不崩”
+
+服务端会发：
+
+```json
+{
+  "type": "error",
+  "code": "QUEUED",
+  "message": "咨询人数较多，已进入排队",
+  "queue_ticket": "uuid",
+  "queue_position": 3,
+  "retry_after_ms": 2000
+}
+```
+
+客户端要做三件事（都可检查）：
+
+1. 展示排队状态（第 N 位）
+2. 保存 `queue_ticket`（例如 localStorage）
+3. 按 `retry_after_ms` 重新建立连接再发 `auth`
+
+**失败场景提醒**：如果客户端不重试，队头会阻塞队列，所以服务端必须配合 TTL 自动剔除“失联队头”。
+
+---
+
+## 6. 复现建议（你可以用它验证上限与排队）
+
+在本机起服务后，你可以写一个脚本用 `ws` 客户端批量连 120 个客户，然后观察：
+
+- 前 99 个客户能 `auth_ok`
+- 之后的客户收到 `QUEUED` 并被 1013 关闭
+- 此时你仍然能用客服 token 连上（因为预留了客服槽位）
+
+这一步如果你要做得更“可检查”，建议把：
+
+- `maxTotalActive/maxAgents/maxCustomers`
+- 当前 `customerSockets.size`
+- 当前 `queue.getHead()/queue position`
+
+打到日志里（仅 demo 环境）。
+
+---
+
+## 小结
+
+到第三部结束，你已经有了一个更接近真实系统的 WS 客服聊天 Demo：
+
+- 能跑：客户/客服两端可联通，能发文本与图片
+- 更稳：心跳清死连接，避免“假满员”
+- 可控：100 连接上限 + FIFO 排队（不踢已连接客户）
+- 可防：限流拦滥用，幂等防重放，历史窗口控成本

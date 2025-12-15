@@ -1,0 +1,954 @@
+---
+title: "WebSocket 客服聊天系统（II）：双端联通——会话、消息、历史与图片"
+date: "2025-12-15"
+episode: "E05"
+cover: "/covers/ws-support-chat-2.jpg"
+description: "在第一部 WS 骨架之上，把“客服端 + 客户端”真正联通：会话模型、订阅机制、历史拉取、文本与图片消息闭环，并提供两张可直接打开的 Demo 页面。"
+tags:
+  - websocket
+  - nodejs
+  - typescript
+  - chat
+  - upload
+---
+
+## 大纲
+
+- 新增聊天领域模型：Conversation / Message（先做内存版，保证可跑）
+- 扩展 WS 协议：`subscribe` / `history` / `message`
+- 订阅机制：同一个会话的参与者共享一个广播通道
+- 图片链路：HTTP 上传 → 返回 URL → WS 发送 image 消息
+- 两端 Demo：`customer.html` 与 `agent.html`，开两个浏览器标签就能对聊
+
+## 背景
+
+“WS 连上了”只是开始。一个能用的客服聊天最少要回答四个问题：
+
+1. **会话是什么？**（一个客户可能多次咨询）
+2. **消息怎么落地？**（否则重连就丢）
+3. **客服如何进入某次会话？**（订阅/切换）
+4. **图片怎么传？**（WS 只负责实时通知，文件一般走 HTTP）
+
+这一部我们把它们做成一个可复现的最小 Demo：你照着文件结构建，就能跑起来对聊。
+
+---
+
+## 1. 项目结构：在第一部基础上加上 chat 与 http
+
+```
+ws-support-chat-demo/
+  package.json
+  tsconfig.json
+  src/
+    index.ts
+    config.ts
+    chat/
+      types.ts
+      store.ts
+    http/
+      upload.ts
+    ws/
+      protocol.ts
+      auth.ts
+      server.ts
+  public/
+    customer.html
+    agent.html
+```
+
+你只需要额外安装一个上传中间件：
+
+```bash
+npm i multer
+npm i -D @types/multer
+```
+
+---
+
+## 2. 聊天领域模型（内存版，但结构要“可替换”）
+
+我们先用内存存储保证可跑；真实项目里你可以把 `chat/store.ts` 替换成 SQLite/Postgres/Redis。
+
+**文件：`src/chat/types.ts`**
+
+```ts
+export type ConversationStatus = 'pending' | 'open' | 'closed';
+export type SenderType = 'customer' | 'agent' | 'system';
+export type MessageType = 'text' | 'image';
+
+export type Conversation = {
+  id: string;
+  customerId: number;
+  status: ConversationStatus;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+};
+
+export type Message = {
+  id: string;
+  conversationId: string;
+  senderType: SenderType;
+  senderId: number | null;
+  type: MessageType;
+  body: string | null;
+  fileUrl: string | null;
+  thumbnailUrl: string | null;
+  clientMessageId: string | null;
+  createdAt: string;
+};
+```
+
+**文件：`src/chat/store.ts`**
+
+```ts
+import crypto from 'crypto';
+import type { Conversation, Message, MessageType, SenderType } from './types';
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function newId(prefix: string) {
+  const uuid = (crypto as any).randomUUID?.();
+  return `${prefix}_${typeof uuid === 'string' ? uuid : crypto.randomBytes(16).toString('hex')}`;
+}
+
+export class ChatStore {
+  private conversationsById = new Map<string, Conversation>();
+  private activeConversationIdByCustomerId = new Map<number, string>();
+  private messagesByConversationId = new Map<string, Message[]>();
+
+  getConversation(conversationId: string): Conversation | null {
+    return this.conversationsById.get(conversationId) ?? null;
+  }
+
+  listConversations(): Conversation[] {
+    return Array.from(this.conversationsById.values()).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  }
+
+  getOrCreateActiveConversation(customerId: number): { conversation: Conversation; isNew: boolean } {
+    const activeId = this.activeConversationIdByCustomerId.get(customerId);
+    if (activeId) {
+      const existing = this.conversationsById.get(activeId);
+      if (existing && existing.status !== 'closed') return { conversation: existing, isNew: false };
+    }
+
+    const now = nowIso();
+    const conversation: Conversation = {
+      id: newId('c'),
+      customerId,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+      lastMessageAt: null,
+    };
+    this.conversationsById.set(conversation.id, conversation);
+    this.activeConversationIdByCustomerId.set(customerId, conversation.id);
+    this.messagesByConversationId.set(conversation.id, []);
+    return { conversation, isNew: true };
+  }
+
+  createMessage(params: {
+    conversationId: string;
+    senderType: SenderType;
+    senderId: number | null;
+    type: MessageType;
+    body?: string | null;
+    fileUrl?: string | null;
+    thumbnailUrl?: string | null;
+    clientMessageId?: string | null;
+  }): Message {
+    const conversation = this.getConversation(params.conversationId);
+    if (!conversation) throw new Error('conversation_not_found');
+
+    const msg: Message = {
+      id: newId('m'),
+      conversationId: params.conversationId,
+      senderType: params.senderType,
+      senderId: params.senderId,
+      type: params.type,
+      body: params.type === 'text' ? (params.body ?? null) : null,
+      fileUrl: params.type === 'image' ? (params.fileUrl ?? null) : null,
+      thumbnailUrl: params.type === 'image' ? (params.thumbnailUrl ?? null) : null,
+      clientMessageId: params.clientMessageId ?? null,
+      createdAt: nowIso(),
+    };
+
+    const list = this.messagesByConversationId.get(params.conversationId) ?? [];
+    list.push(msg);
+    this.messagesByConversationId.set(params.conversationId, list);
+
+    conversation.updatedAt = msg.createdAt;
+    conversation.lastMessageAt = msg.createdAt;
+    if (params.senderType === 'agent' && conversation.status !== 'closed') conversation.status = 'open';
+    this.conversationsById.set(conversation.id, conversation);
+
+    return msg;
+  }
+
+  listMessages(params: { conversationId: string; limit: number; offset: number }) {
+    const list = this.messagesByConversationId.get(params.conversationId) ?? [];
+    const start = Math.max(0, params.offset);
+    const end = Math.min(list.length, start + params.limit);
+    return list.slice(start, end);
+  }
+}
+```
+
+**设计点**：你会发现这个 store 的接口长得很“数据库友好”。等你换成真正的 DB，只要保证这些函数语义一致，WS 层不用大改。
+
+---
+
+## 3. 扩展 WS 协议：subscribe / history / message
+
+**文件：`src/ws/protocol.ts`（在第一部基础上新增）**
+
+```ts
+export type ClientType = 'customer' | 'agent';
+
+export type UserDTO = {
+  id: number;
+  name: string;
+  role: ClientType;
+};
+
+export type ConversationDTO = {
+  id: string;
+  customerId: number;
+  status: 'pending' | 'open' | 'closed';
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+};
+
+export type MessageDTO = {
+  id: string;
+  conversationId: string;
+  senderType: 'customer' | 'agent' | 'system';
+  senderId: number | null;
+  type: 'text' | 'image';
+  body: string | null;
+  fileUrl: string | null;
+  thumbnailUrl: string | null;
+  clientMessageId: string | null;
+  createdAt: string;
+};
+
+export type ClientToServer =
+  | { type: 'auth'; token: string }
+  | { type: 'ping'; ts?: number }
+  | { type: 'subscribe'; conversationId: string }
+  | { type: 'history'; conversationId: string; limit?: number; offset?: number }
+  | {
+      type: 'message';
+      conversationId: string;
+      messageType: 'text' | 'image';
+      body?: string;
+      fileUrl?: string;
+      thumbnailUrl?: string;
+      clientMessageId?: string;
+    };
+
+export type ServerToClient =
+  | { type: 'hello'; required: Array<'auth'> }
+  | { type: 'auth_ok'; user: UserDTO; conversation?: ConversationDTO }
+  | { type: 'pong'; ts: number }
+  | { type: 'conversation'; conversation: ConversationDTO }
+  | { type: 'history'; conversationId: string; messages: MessageDTO[] }
+  | { type: 'message'; message: MessageDTO }
+  | { type: 'error'; code: string; message: string; retry_after_ms?: number; client_message_id?: string };
+```
+
+---
+
+## 4. WS server 接入聊天逻辑：订阅、广播、权限
+
+我们把“WS 层”只当成一个消息总线：
+
+- **谁能订阅哪条会话**（权限）
+- **谁发了什么消息**（写入 store）
+- **把消息广播给订阅者**（实时）
+
+**文件：`src/ws/server.ts`（核心改造）**
+
+```ts
+import { WebSocketServer, WebSocket } from 'ws';
+import type { IncomingMessage } from 'http';
+import type { ClientToServer, ServerToClient, ConversationDTO, MessageDTO, UserDTO } from './protocol';
+import { loadUser, verifyToken } from './auth';
+import { ChatStore } from '../chat/store';
+import type { Conversation, Message } from '../chat/types';
+
+type ClientState = {
+  ws: WebSocket;
+  authenticated: boolean;
+  user: UserDTO | null;
+  role: 'customer' | 'agent' | null;
+  subscribedConversationIds: Set<string>;
+};
+
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function send(ws: WebSocket, payload: ServerToClient) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify(payload));
+  } catch {
+    // ignore
+  }
+}
+
+function sendError(
+  ws: WebSocket,
+  message: string,
+  code = 'BAD_REQUEST',
+  extra: Record<string, unknown> = {}
+) {
+  send(ws, { type: 'error', code, message, ...(extra as any) });
+}
+
+function toConversationDTO(c: Conversation): ConversationDTO {
+  return {
+    id: c.id,
+    customerId: c.customerId,
+    status: c.status,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    lastMessageAt: c.lastMessageAt,
+  };
+}
+
+function toMessageDTO(m: Message): MessageDTO {
+  return {
+    id: m.id,
+    conversationId: m.conversationId,
+    senderType: m.senderType,
+    senderId: m.senderId,
+    type: m.type,
+    body: m.body,
+    fileUrl: m.fileUrl,
+    thumbnailUrl: m.thumbnailUrl,
+    clientMessageId: m.clientMessageId,
+    createdAt: m.createdAt,
+  };
+}
+
+export function createChatWsServer(params: { jwtSecret: string }) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1_000_000 });
+
+  const store = new ChatStore();
+  const wsToState = new Map<WebSocket, ClientState>();
+  const subscribersByConversationId = new Map<string, Set<WebSocket>>();
+  const agentSockets = new Set<WebSocket>();
+
+  function subscribe(ws: WebSocket, conversationId: string) {
+    const state = wsToState.get(ws);
+    if (!state) return;
+    if (!subscribersByConversationId.has(conversationId)) subscribersByConversationId.set(conversationId, new Set());
+    subscribersByConversationId.get(conversationId)!.add(ws);
+    state.subscribedConversationIds.add(conversationId);
+  }
+
+  function unsubscribeAll(ws: WebSocket) {
+    const state = wsToState.get(ws);
+    if (!state) return;
+    for (const conversationId of state.subscribedConversationIds) {
+      const set = subscribersByConversationId.get(conversationId);
+      if (!set) continue;
+      set.delete(ws);
+      if (set.size === 0) subscribersByConversationId.delete(conversationId);
+    }
+    state.subscribedConversationIds.clear();
+  }
+
+  function broadcastToConversation(conversationId: string, payload: ServerToClient) {
+    const set = subscribersByConversationId.get(conversationId);
+    if (!set) return;
+    for (const s of set) send(s, payload);
+  }
+
+  function broadcastToAgents(payload: ServerToClient) {
+    for (const ws of agentSockets) send(ws, payload);
+  }
+
+  async function handleAuth(ws: WebSocket, token: string) {
+    const payload = verifyToken({ secret: params.jwtSecret, token });
+    if (!payload) {
+      sendError(ws, 'token 无效或已过期', 'UNAUTHORIZED');
+      ws.close();
+      return;
+    }
+
+    const state = wsToState.get(ws);
+    if (!state) return;
+
+    const user = loadUser(payload);
+    state.user = user;
+    state.role = user.role;
+    state.authenticated = true;
+
+    if (state.role === 'customer') {
+      const { conversation, isNew } = store.getOrCreateActiveConversation(user.id);
+      subscribe(ws, conversation.id);
+      send(ws, { type: 'auth_ok', user, conversation: toConversationDTO(conversation) });
+      if (isNew) broadcastToAgents({ type: 'conversation', conversation: toConversationDTO(conversation) });
+      return;
+    }
+
+    agentSockets.add(ws);
+    send(ws, { type: 'auth_ok', user });
+    // 让客服端“无论先开哪个页面”都能看到已有会话
+    for (const c of store.listConversations()) {
+      send(ws, { type: 'conversation', conversation: toConversationDTO(c) });
+    }
+  }
+
+  async function handleSubscribe(ws: WebSocket, conversationId: string) {
+    const state = wsToState.get(ws);
+    if (!state || !state.authenticated || !state.user || !state.role) return sendError(ws, '未认证', 'UNAUTHORIZED');
+    if (state.role !== 'agent') return sendError(ws, '仅客服可订阅会话', 'FORBIDDEN');
+
+    const conv = store.getConversation(conversationId);
+    if (!conv) return sendError(ws, '会话不存在', 'NOT_FOUND');
+
+    subscribe(ws, conversationId);
+    send(ws, { type: 'conversation', conversation: toConversationDTO(conv) });
+  }
+
+  async function handleHistory(ws: WebSocket, conversationId: string, limit: number, offset: number) {
+    const state = wsToState.get(ws);
+    if (!state || !state.authenticated || !state.user || !state.role) return sendError(ws, '未认证', 'UNAUTHORIZED');
+
+    const conv = store.getConversation(conversationId);
+    if (!conv) return sendError(ws, '会话不存在', 'NOT_FOUND');
+
+    if (state.role === 'customer' && conv.customerId !== state.user.id) return sendError(ws, '无权限访问该会话', 'FORBIDDEN');
+
+    const take = Math.min(Math.max(1, limit || 50), 100);
+    const safeOffset = Math.max(0, offset || 0);
+    const messages = store.listMessages({ conversationId, limit: take, offset: safeOffset });
+    send(ws, { type: 'history', conversationId, messages: messages.map(toMessageDTO) });
+  }
+
+  async function handleMessage(ws: WebSocket, msg: Extract<ClientToServer, { type: 'message' }>) {
+    const state = wsToState.get(ws);
+    if (!state || !state.authenticated || !state.user || !state.role) return sendError(ws, '未认证', 'UNAUTHORIZED');
+
+    const conversationId = String(msg.conversationId || '');
+    if (!conversationId) return sendError(ws, 'conversationId 不能为空');
+
+    const conv = store.getConversation(conversationId);
+    if (!conv) return sendError(ws, '会话不存在', 'NOT_FOUND');
+
+    if (state.role === 'customer' && conv.customerId !== state.user.id) return sendError(ws, '无权限访问该会话', 'FORBIDDEN');
+
+    const messageType = msg.messageType === 'image' ? 'image' : 'text';
+    const textBody = typeof msg.body === 'string' ? msg.body.trim() : '';
+    const fileUrl = typeof msg.fileUrl === 'string' ? msg.fileUrl.trim() : '';
+    const thumbnailUrl = typeof msg.thumbnailUrl === 'string' ? msg.thumbnailUrl.trim() : '';
+    const clientMessageId = typeof msg.clientMessageId === 'string' ? msg.clientMessageId : null;
+
+    if (messageType === 'text' && !textBody) return sendError(ws, '消息内容不能为空');
+    if (messageType === 'image' && !fileUrl) return sendError(ws, '图片 URL 不能为空');
+
+    const created = store.createMessage({
+      conversationId,
+      senderType: state.role,
+      senderId: state.user.id,
+      type: messageType,
+      body: textBody,
+      fileUrl,
+      thumbnailUrl: thumbnailUrl || null,
+      clientMessageId,
+    });
+
+    const messageDto = toMessageDTO(created);
+    broadcastToConversation(conversationId, { type: 'message', message: messageDto });
+    broadcastToAgents({ type: 'conversation', conversation: toConversationDTO(store.getConversation(conversationId)!) });
+  }
+
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage) => {
+    wsToState.set(ws, {
+      ws,
+      authenticated: false,
+      user: null,
+      role: null,
+      subscribedConversationIds: new Set(),
+    });
+    send(ws, { type: 'hello', required: ['auth'] });
+
+    ws.on('message', async (data) => {
+      const text = typeof data === 'string' ? data : data.toString();
+      const parsed = safeJsonParse(text) as any;
+      if (!parsed || typeof parsed.type !== 'string') return sendError(ws, '消息格式错误');
+
+      const type = parsed.type as ClientToServer['type'];
+      if (type === 'auth') {
+        const token = typeof parsed.token === 'string' ? parsed.token : '';
+        if (!token) return sendError(ws, 'token 不能为空');
+        await handleAuth(ws, token);
+        return;
+      }
+
+      const state = wsToState.get(ws);
+      if (!state || !state.authenticated) return sendError(ws, '未认证', 'UNAUTHORIZED');
+
+      if (type === 'ping') return send(ws, { type: 'pong', ts: Date.now() });
+      if (type === 'subscribe') return handleSubscribe(ws, String(parsed.conversationId || ''));
+      if (type === 'history')
+        return handleHistory(ws, String(parsed.conversationId || ''), Number(parsed.limit || 50), Number(parsed.offset || 0));
+      if (type === 'message') return handleMessage(ws, parsed as any);
+
+      sendError(ws, '未知消息类型');
+    });
+
+    ws.on('close', () => {
+      unsubscribeAll(ws);
+      agentSockets.delete(ws);
+      wsToState.delete(ws);
+    });
+
+    ws.on('error', () => {
+      unsubscribeAll(ws);
+      agentSockets.delete(ws);
+      wsToState.delete(ws);
+    });
+  });
+
+  return wss;
+}
+```
+
+---
+
+## 5. 图片上传：HTTP → URL → WS（不要把文件塞进 WS）
+
+**文件：`src/http/upload.ts`**
+
+```ts
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
+import type { Request, Response } from 'express';
+
+function ensureDir(dir: string) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+export function createUploadRouter(params: { uploadDir: string }) {
+  ensureDir(params.uploadDir);
+
+  const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, params.uploadDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || '') || '.bin';
+      const safeExt = ext.slice(0, 10);
+      cb(null, `${Date.now()}_${Math.random().toString(16).slice(2)}${safeExt}`);
+    },
+  });
+
+  const upload = multer({
+    storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+    fileFilter: (_req, file, cb) => {
+      if (!file.mimetype.startsWith('image/')) return cb(new Error('only_images_allowed'));
+      cb(null, true);
+    },
+  });
+
+  const handler = [
+    upload.single('file'),
+    (req: Request, res: Response) => {
+      const f = req.file;
+      if (!f) return res.status(400).json({ message: 'file required' });
+      const fileUrl = `/uploads/chat/${f.filename}`;
+      res.json({ fileUrl, thumbnailUrl: fileUrl, mimeType: f.mimetype });
+    },
+  ];
+
+  return { handler };
+}
+```
+
+然后在 HTTP 入口里注册：
+
+**文件：`src/index.ts`（新增）**
+
+```ts
+import path from 'path';
+import express from 'express';
+import http from 'http';
+import { WebSocket } from 'ws';
+import { getConfig } from './config';
+import { signToken } from './ws/auth';
+import { createChatWsServer } from './ws/server';
+import { createUploadRouter } from './http/upload';
+
+const config = getConfig();
+const app = express();
+app.use(express.json());
+
+app.use(express.static(path.join(process.cwd(), 'public')));
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+app.post('/api/dev/login', (req, res) => {
+  const role = req.body?.role === 'agent' ? 'agent' : 'customer';
+  const userId = Math.max(1, Number(req.body?.userId || 1));
+  const token = signToken({ secret: config.jwtSecret, userId, role, expiresIn: '7d' });
+  res.json({ token, role, userId });
+});
+
+const uploadDir = path.join(process.cwd(), 'uploads', 'chat');
+const upload = createUploadRouter({ uploadDir });
+app.post('/api/uploads', ...upload.handler);
+
+const server = http.createServer(app);
+const wss = createChatWsServer({ jwtSecret: config.jwtSecret });
+
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const base = `http://${req.headers.host || 'localhost'}`;
+    const url = new URL(req.url || '/', base);
+    if (url.pathname !== '/ws/chat') return;
+
+    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+      wss.emit('connection', ws, req);
+    });
+  } catch {
+    socket.destroy();
+  }
+});
+
+server.listen(config.port, () => {
+  // eslint-disable-next-line no-console
+  console.log(`[dev] http://localhost:${config.port}`);
+});
+```
+
+---
+
+## 6. 最小前端：两张 HTML 页面开两端角色
+
+为了让你“打开浏览器就能验证”，我们用最朴素的静态页面做 demo。
+
+### 6.1 `public/customer.html`
+
+```html
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Customer Chat</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto; margin: 0; padding: 16px; background: #0b0c10; color: #e6e6e6; }
+      .row { display: flex; gap: 8px; }
+      .box { border: 1px solid #2a2f3a; border-radius: 12px; padding: 12px; background: #12141b; }
+      #log { height: 360px; overflow: auto; }
+      input, button { padding: 10px 12px; border-radius: 10px; border: 1px solid #2a2f3a; background: #0b0c10; color: #e6e6e6; }
+      button { cursor: pointer; }
+      img { max-width: 240px; border-radius: 10px; display: block; margin-top: 6px; }
+      .meta { color: #9aa4b2; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h2>Customer</h2>
+    <div class="row">
+      <div class="box" style="flex: 1">
+        <div class="meta" id="status">disconnected</div>
+        <div id="log" class="box" style="margin-top: 10px"></div>
+        <div class="row" style="margin-top: 10px">
+          <input id="text" style="flex: 1" placeholder="输入消息..." />
+          <button id="send">发送</button>
+        </div>
+        <div class="row" style="margin-top: 10px; align-items: center">
+          <input id="file" type="file" accept="image/*" />
+          <button id="sendImage">发送图片</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $('status');
+      const logEl = $('log');
+      const textEl = $('text');
+      const fileEl = $('file');
+
+      let token = null;
+      let ws = null;
+      let conversationId = null;
+
+      function log(line) {
+        const div = document.createElement('div');
+        div.textContent = line;
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function logMessage(m) {
+        const div = document.createElement('div');
+        div.className = 'box';
+        div.style.marginTop = '8px';
+        div.innerHTML = `<div class="meta">${m.senderType} @ ${m.createdAt}</div>`;
+        if (m.type === 'text') {
+          div.innerHTML += `<div>${(m.body || '').replaceAll('<', '&lt;')}</div>`;
+        } else {
+          div.innerHTML += `<div class="meta">image</div>`;
+          const img = document.createElement('img');
+          img.src = m.thumbnailUrl || m.fileUrl;
+          div.appendChild(img);
+        }
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      async function devLogin() {
+        const resp = await fetch('/api/dev/login', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ role: 'customer', userId: 1 }),
+        });
+        const data = await resp.json();
+        token = data.token;
+      }
+
+      async function connect() {
+        if (!token) await devLogin();
+        ws = new WebSocket(`ws://${location.host}/ws/chat`);
+        statusEl.textContent = 'connecting...';
+
+        ws.addEventListener('open', () => {
+          statusEl.textContent = 'authing...';
+          ws.send(JSON.stringify({ type: 'auth', token }));
+        });
+
+        ws.addEventListener('message', (evt) => {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'auth_ok') {
+            statusEl.textContent = 'connected';
+            conversationId = msg.conversation?.id || null;
+            log(`auth_ok conversation=${conversationId}`);
+            ws.send(JSON.stringify({ type: 'history', conversationId, limit: 50, offset: 0 }));
+          }
+          if (msg.type === 'history') {
+            log(`history size=${msg.messages.length}`);
+            msg.messages.forEach(logMessage);
+          }
+          if (msg.type === 'message') logMessage(msg.message);
+          if (msg.type === 'error') log(`error ${msg.code}: ${msg.message}`);
+        });
+
+        ws.addEventListener('close', () => {
+          statusEl.textContent = 'disconnected';
+          log('closed');
+        });
+      }
+
+      $('send').addEventListener('click', () => {
+        if (!ws || ws.readyState !== 1) return;
+        const body = (textEl.value || '').trim();
+        if (!body || !conversationId) return;
+        ws.send(JSON.stringify({ type: 'message', conversationId, messageType: 'text', body }));
+        textEl.value = '';
+      });
+
+      $('sendImage').addEventListener('click', async () => {
+        const f = fileEl.files?.[0];
+        if (!f || !conversationId) return;
+        const fd = new FormData();
+        fd.append('file', f);
+        const resp = await fetch('/api/uploads', { method: 'POST', body: fd });
+        const data = await resp.json();
+        ws.send(JSON.stringify({ type: 'message', conversationId, messageType: 'image', fileUrl: data.fileUrl, thumbnailUrl: data.thumbnailUrl }));
+        fileEl.value = '';
+      });
+
+      connect().catch((e) => log(String(e)));
+    </script>
+  </body>
+</html>
+```
+
+### 6.2 `public/agent.html`
+
+```html
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Chat</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto; margin: 0; padding: 16px; background: #0b0c10; color: #e6e6e6; }
+      .row { display: flex; gap: 12px; }
+      .box { border: 1px solid #2a2f3a; border-radius: 12px; padding: 12px; background: #12141b; }
+      #log { height: 360px; overflow: auto; }
+      #convs { height: 360px; overflow: auto; }
+      input, button { padding: 10px 12px; border-radius: 10px; border: 1px solid #2a2f3a; background: #0b0c10; color: #e6e6e6; }
+      button { cursor: pointer; }
+      img { max-width: 240px; border-radius: 10px; display: block; margin-top: 6px; }
+      .meta { color: #9aa4b2; font-size: 12px; }
+      .conv { padding: 10px; border: 1px solid #2a2f3a; border-radius: 10px; cursor: pointer; margin-top: 8px; }
+      .conv.active { border-color: #7c8cff; }
+    </style>
+  </head>
+  <body>
+    <h2>Agent</h2>
+    <div class="row">
+      <div class="box" style="width: 320px">
+        <div class="meta" id="status">disconnected</div>
+        <div id="convs" class="box" style="margin-top: 10px"></div>
+      </div>
+      <div class="box" style="flex: 1">
+        <div class="meta">current conversation: <span id="current">-</span></div>
+        <div id="log" class="box" style="margin-top: 10px"></div>
+        <div class="row" style="margin-top: 10px">
+          <input id="text" style="flex: 1" placeholder="输入消息..." />
+          <button id="send">发送</button>
+        </div>
+        <div class="row" style="margin-top: 10px; align-items: center">
+          <input id="file" type="file" accept="image/*" />
+          <button id="sendImage">发送图片</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $('status');
+      const convsEl = $('convs');
+      const logEl = $('log');
+      const currentEl = $('current');
+      const textEl = $('text');
+      const fileEl = $('file');
+
+      let token = null;
+      let ws = null;
+      let currentConversationId = null;
+      const conversations = new Map();
+
+      function renderConversations() {
+        convsEl.innerHTML = '';
+        for (const c of Array.from(conversations.values()).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))) {
+          const div = document.createElement('div');
+          div.className = 'conv' + (c.id === currentConversationId ? ' active' : '');
+          div.textContent = `${c.id} (customer=${c.customerId}, status=${c.status})`;
+          div.addEventListener('click', () => selectConversation(c.id));
+          convsEl.appendChild(div);
+        }
+      }
+
+      function logMessage(m) {
+        const div = document.createElement('div');
+        div.className = 'box';
+        div.style.marginTop = '8px';
+        div.innerHTML = `<div class="meta">${m.senderType} @ ${m.createdAt}</div>`;
+        if (m.type === 'text') {
+          div.innerHTML += `<div>${(m.body || '').replaceAll('<', '&lt;')}</div>`;
+        } else {
+          div.innerHTML += `<div class="meta">image</div>`;
+          const img = document.createElement('img');
+          img.src = m.thumbnailUrl || m.fileUrl;
+          div.appendChild(img);
+        }
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      async function devLogin() {
+        const resp = await fetch('/api/dev/login', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ role: 'agent', userId: 1 }),
+        });
+        const data = await resp.json();
+        token = data.token;
+      }
+
+      async function connect() {
+        if (!token) await devLogin();
+        ws = new WebSocket(`ws://${location.host}/ws/chat`);
+        statusEl.textContent = 'connecting...';
+
+        ws.addEventListener('open', () => {
+          statusEl.textContent = 'authing...';
+          ws.send(JSON.stringify({ type: 'auth', token }));
+        });
+
+        ws.addEventListener('message', (evt) => {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'auth_ok') statusEl.textContent = 'connected';
+          if (msg.type === 'conversation') {
+            conversations.set(msg.conversation.id, msg.conversation);
+            renderConversations();
+          }
+          if (msg.type === 'history' && msg.conversationId === currentConversationId) {
+            msg.messages.forEach(logMessage);
+          }
+          if (msg.type === 'message') logMessage(msg.message);
+        });
+      }
+
+      function selectConversation(conversationId) {
+        currentConversationId = conversationId;
+        currentEl.textContent = conversationId;
+        renderConversations();
+        logEl.innerHTML = '';
+        ws.send(JSON.stringify({ type: 'subscribe', conversationId }));
+        ws.send(JSON.stringify({ type: 'history', conversationId, limit: 50, offset: 0 }));
+      }
+
+      $('send').addEventListener('click', () => {
+        if (!ws || ws.readyState !== 1 || !currentConversationId) return;
+        const body = (textEl.value || '').trim();
+        if (!body) return;
+        ws.send(JSON.stringify({ type: 'message', conversationId: currentConversationId, messageType: 'text', body }));
+        textEl.value = '';
+      });
+
+      $('sendImage').addEventListener('click', async () => {
+        const f = fileEl.files?.[0];
+        if (!f || !currentConversationId) return;
+        const fd = new FormData();
+        fd.append('file', f);
+        const resp = await fetch('/api/uploads', { method: 'POST', body: fd });
+        const data = await resp.json();
+        ws.send(JSON.stringify({ type: 'message', conversationId: currentConversationId, messageType: 'image', fileUrl: data.fileUrl, thumbnailUrl: data.thumbnailUrl }));
+        fileEl.value = '';
+      });
+
+      connect().catch(console.error);
+    </script>
+  </body>
+</html>
+```
+
+---
+
+## 7. 复现步骤（两端联通）
+
+1. 启动：`npm run dev`
+2. 打开两个页面：
+   - `http://localhost:3000/customer.html`
+   - `http://localhost:3000/agent.html`
+3. Customer 页面发消息，Agent 页面应该实时收到
+4. Agent 选择会话后回复，Customer 页面应该实时收到
+5. 两端都能上传图片并发送 image 消息
+
+---
+
+## 下一步
+
+第三部我们会在这个可用 demo 上做“生产级硬化”：
+
+- 连接上限 100 + 客户 FIFO 排队（已连接客户不被踢）
+- 客服永远可连（多开时替换旧客服连接，避免互相抢重连）
+- 限流、幂等、7 日历史窗口、心跳与断线清理

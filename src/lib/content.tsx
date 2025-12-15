@@ -8,6 +8,7 @@ import { CodeBlock } from "@/components/mdx/code-block";
 
 export type EpisodeFrontmatter = {
   title: string;
+  listTitle?: string;
   date: string;
   episode?: string;
   cover?: string;
@@ -41,6 +42,7 @@ function normalizeFrontmatter(
 ): Omit<EpisodeMeta, "readingMinutes"> {
   const slug = isValidString(data.slug) ? toSlug(data.slug) : fallbackSlug;
   const title = isValidString(data.title) ? toSlug(data.title) : "";
+  const listTitle = isValidString(data.listTitle) ? toSlug(data.listTitle) : undefined;
   const date = isValidString(data.date) ? toSlug(data.date) : "";
 
   if (!title) {
@@ -74,6 +76,7 @@ function normalizeFrontmatter(
   return {
     slug,
     title,
+    listTitle,
     date,
     episode,
     cover,
@@ -93,13 +96,40 @@ const countWords = (text: string) =>
 const calcReadingMinutes = (body: string) =>
   Math.max(1, Math.ceil(countWords(body) / 180));
 
+const parseEpisodeNumber = (value?: string) => {
+  if (!value) return undefined;
+  const match = value.match(/\d+/);
+  if (!match) return undefined;
+  const parsed = Number(match[0]);
+  if (Number.isNaN(parsed)) return undefined;
+  return parsed;
+};
+
 const sortByDateDesc = (a: EpisodeMeta, b: EpisodeMeta) => {
   const aTime = Date.parse(a.date);
   const bTime = Date.parse(b.date);
 
-  if (Number.isNaN(aTime) || Number.isNaN(bTime)) return 0;
+  const aTimeValid = !Number.isNaN(aTime);
+  const bTimeValid = !Number.isNaN(bTime);
 
-  return bTime - aTime;
+  if (aTimeValid && bTimeValid && aTime !== bTime) {
+    return bTime - aTime;
+  }
+
+  if (aTimeValid && !bTimeValid) return -1;
+  if (!aTimeValid && bTimeValid) return 1;
+
+  const aEpisode = parseEpisodeNumber(a.episode);
+  const bEpisode = parseEpisodeNumber(b.episode);
+
+  if (aEpisode != null && bEpisode != null && aEpisode !== bEpisode) {
+    return aEpisode - bEpisode;
+  }
+
+  if (aEpisode != null && bEpisode == null) return -1;
+  if (aEpisode == null && bEpisode != null) return 1;
+
+  return a.slug.localeCompare(b.slug);
 };
 
 const collectMdxFiles = async (dir: string): Promise<string[]> => {
