@@ -2,14 +2,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Comments } from "@/components/comments";
 import { EpisodeActions } from "@/components/episode-actions";
-import { getEpisodeBySlug, getEpisodeSlugs } from "@/lib/content";
-import { getEngagementForRequest } from "@/lib/engagement";
+import { getEpisodeBySlug, getEpisodeMetaBySlug, getEpisodeSlugs } from "@/lib/content";
 import { EpisodeScrollControls } from "@/components/episode-scroll-controls";
 
 export async function generateStaticParams() {
   const slugs = await getEpisodeSlugs();
   return slugs.map((slug) => ({ slug }));
 }
+
+export const dynamicParams = false;
 
 type EpisodePageProps = {
   params: Promise<{ slug: string }>;
@@ -19,7 +20,7 @@ export async function generateMetadata({ params }: EpisodePageProps) {
   const { slug } = await params;
 
   try {
-    const { meta } = await getEpisodeBySlug(slug);
+    const meta = await getEpisodeMetaBySlug(slug);
 
     return {
       title: meta.title,
@@ -40,7 +41,6 @@ export default async function EpisodePage({ params }: EpisodePageProps) {
 
   try {
     const { meta, content } = await getEpisodeBySlug(slug);
-    const engagement = await getEngagementForRequest(slug, meta.title);
 
     return (
       <div className="episode-layout">
@@ -62,17 +62,17 @@ export default async function EpisodePage({ params }: EpisodePageProps) {
             </svg>
             返回
           </Link>
-          <EpisodeActions
-            date={meta.date}
-            tags={meta.tags}
-            readingMinutes={meta.readingMinutes}
-            slug={meta.slug}
-            title={meta.title}
-            views={engagement.views}
-            likes={engagement.likes}
-            liked={engagement.liked}
-          />
-        </aside>
+            <EpisodeActions
+              date={meta.date}
+              tags={meta.tags}
+              readingMinutes={meta.readingMinutes}
+              slug={meta.slug}
+              title={meta.title}
+              views={0}
+              likes={0}
+              liked={false}
+            />
+          </aside>
         <EpisodeScrollControls title={meta.title} description={meta.description} />
 
         <main className="episode-main">
@@ -100,4 +100,3 @@ export default async function EpisodePage({ params }: EpisodePageProps) {
     notFound();
   }
 }
-export const dynamic = "force-dynamic";

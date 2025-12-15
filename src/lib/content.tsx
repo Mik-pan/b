@@ -154,41 +154,96 @@ const buildIndex = async (): Promise<EpisodeIndexItem[]> => {
   return parsed.sort(sortByDateDesc);
 };
 
-export const getEpisodeSlugs = async (): Promise<string[]> => {
-  const index = await buildIndex();
-  return index.map((item) => item.slug);
+const shouldCache = process.env.NODE_ENV === "production";
+let indexCache: EpisodeIndexItem[] | undefined;
+let indexBuild: Promise<EpisodeIndexItem[]> | undefined;
+
+const getIndex = async () => {
+  if (!shouldCache) return buildIndex();
+  if (indexCache) return indexCache;
+  if (indexBuild) return indexBuild;
+
+  indexBuild = buildIndex()
+    .then((index) => {
+      indexCache = index;
+      return index;
+    })
+    .finally(() => {
+      indexBuild = undefined;
+    });
+
+  return indexBuild;
 };
 
-export const getEpisodes = async (): Promise<EpisodeMeta[]> => {
-  const index = await buildIndex();
-  return index.map(({ filePath, ...meta }) => meta);
+type EpisodeContentResult = {
+  meta: EpisodeMeta;
+  content: ReactElement;
 };
 
-export const getEpisodeBySlug = async (slug: string) => {
-  const index = await buildIndex();
+let episodeBySlugCache: Map<string, Promise<EpisodeContentResult>> | undefined;
+
+const compileEpisodeBySlug = async (slug: string): Promise<EpisodeContentResult> => {
+  const index = await getIndex();
   const match = index.find((item) => item.slug === slug);
 
   if (!match) {
     throw new Error(`Episode not found for slug "${slug}"`);
   }
 
-  const source = await fs.readFile(match.filePath, "utf8");
-  const { content, frontmatter } = await compileMDX<EpisodeFrontmatter>({
-    source,
+  const { filePath, body, ...meta } = match;
+  const { content } = await compileMDX({
+    source: body,
     components: {
       pre: (props) => <CodeBlock {...props} />,
     },
     options: {
-      parseFrontmatter: true,
+      parseFrontmatter: false,
       mdxOptions: {
         rehypePlugins: [...rehypePlugins],
       },
     },
   });
 
-  const metaBase = normalizeFrontmatter(frontmatter ?? {}, match.slug);
-  const readingMinutes = match.readingMinutes ?? calcReadingMinutes(source);
-  const meta = { ...metaBase, readingMinutes };
-
   return { meta, content: content as ReactElement };
+};
+
+export const getEpisodeSlugs = async (): Promise<string[]> => {
+  const index = await getIndex();
+  return index.map((item) => item.slug);
+};
+
+export const getEpisodes = async (): Promise<EpisodeMeta[]> => {
+  const index = await getIndex();
+  return index.map(({ filePath, body, ...meta }) => meta);
+};
+
+export const getEpisodeMetaBySlug = async (slug: string): Promise<EpisodeMeta> => {
+  const index = await getIndex();
+  const match = index.find((item) => item.slug === slug);
+
+  if (!match) {
+    throw new Error(`Episode not found for slug "${slug}"`);
+  }
+
+  const { filePath, body, ...meta } = match;
+  return meta;
+};
+
+export const getEpisodeBySlug = async (slug: string) => {
+  if (!shouldCache) return compileEpisodeBySlug(slug);
+
+  if (!episodeBySlugCache) {
+    episodeBySlugCache = new Map();
+  }
+
+  const cached = episodeBySlugCache.get(slug);
+  if (cached) return cached;
+
+  const promise = compileEpisodeBySlug(slug);
+  episodeBySlugCache.set(slug, promise);
+  promise.catch(() => {
+    episodeBySlugCache?.delete(slug);
+  });
+
+  return promise;
 };

@@ -1,16 +1,13 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
-import { getEngagementForRequest } from "@/lib/engagement";
 import { prisma } from "@/lib/prisma";
 import { getClientIdentity } from "@/lib/session";
-import { Prisma } from "@prisma/client";
 
 type TransactionClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
 
 export const recordViewAction = async (slug: string, title?: string) => {
   const { sessionId, ipHash } = await getClientIdentity({ createCookie: true });
-  if (!sessionId) return { views: 0 };
+  if (!sessionId) return { views: 0, likes: 0, liked: false };
 
   await prisma.$transaction(async (tx: TransactionClient) => {
     await tx.episode.upsert({
@@ -33,8 +30,19 @@ export const recordViewAction = async (slug: string, title?: string) => {
     });
   });
 
-  const views = await prisma.view.count({ where: { slug } });
-  return { views };
+  const [views, likes, liked] = await Promise.all([
+    prisma.view.count({ where: { slug } }),
+    prisma.like.count({ where: { slug } }),
+    prisma.like.findFirst({
+      where: {
+        slug,
+        OR: [{ sessionId }, ...(ipHash ? [{ ipHash }] : [])],
+      },
+      select: { id: true },
+    }),
+  ]);
+
+  return { views, likes, liked: Boolean(liked) };
 };
 
 export const toggleLikeAction = async (slug: string, title?: string) => {
@@ -70,10 +78,6 @@ export const toggleLikeAction = async (slug: string, title?: string) => {
   }
 
   const likes = await prisma.like.count({ where: { slug } });
-  revalidatePath(`/episodes/${slug}`);
 
   return { liked: !existing, likes };
 };
-
-export const getEngagement = async (slug: string, title?: string) =>
-  getEngagementForRequest(slug, title);

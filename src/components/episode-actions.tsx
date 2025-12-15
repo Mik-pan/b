@@ -34,6 +34,10 @@ export function EpisodeActions({
   const pathname = usePathname();
   const link = typeof window !== "undefined" ? window.location.origin + pathname : pathname;
 
+  React.useEffect(() => {
+    setState({ views, likes, liked });
+  }, [slug, views, likes, liked]);
+
   const handleCopyLink = async () => {
     if (!link) return;
     try {
@@ -64,9 +68,12 @@ export function EpisodeActions({
         const res = await import("@/app/actions/engagement").then((m) =>
           m.recordViewAction(slug, title),
         );
-        if (res?.views !== undefined) {
-          setState((prev) => ({ ...prev, views: res.views }));
-        }
+        if (!res) return;
+        setState((prev) => ({
+          views: res.views ?? prev.views,
+          likes: res.likes ?? prev.likes,
+          liked: res.liked ?? prev.liked,
+        }));
       } catch (error) {
         console.error("View record failed", error);
       }

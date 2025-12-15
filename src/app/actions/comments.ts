@@ -1,6 +1,5 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { getClientIdentity } from "@/lib/session";
 
@@ -64,7 +63,6 @@ export async function createCommentAction(
     },
   });
 
-  revalidatePath(`/episodes/${slug}`);
   return { ok: true };
 }
 

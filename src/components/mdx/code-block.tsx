@@ -1,25 +1,9 @@
 "use client";
 
-import React, { useMemo, useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 
 type PreProps = React.HTMLAttributes<HTMLPreElement> & {
   children?: React.ReactNode;
-};
-
-const extractText = (node: React.ReactNode): string => {
-  if (typeof node === "string" || typeof node === "number") {
-    return String(node);
-  }
-
-  if (Array.isArray(node)) {
-    return node.map(extractText).join("");
-  }
-
-  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
-    return extractText(node.props.children);
-  }
-
-  return "";
 };
 
 const MAX_HEIGHT = 180;
@@ -30,7 +14,6 @@ export function CodeBlock({ children, className, ...rest }: PreProps) {
   const [needsExpansion, setNeedsExpansion] = useState(false);
   const preRef = useRef<HTMLPreElement>(null);
 
-  const text = useMemo(() => extractText(children), [children]);
   const language =
     (rest as { ["data-language"]?: string })["data-language"] ??
     (typeof className === "string" && className.startsWith("language-")
@@ -46,6 +29,7 @@ export function CodeBlock({ children, className, ...rest }: PreProps) {
   }, [children]);
 
   const handleCopy = async () => {
+    const text = preRef.current?.textContent ?? "";
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -72,7 +56,7 @@ export function CodeBlock({ children, className, ...rest }: PreProps) {
         {...rest}
         style={{
           maxHeight: needsExpansion && !isExpanded ? `${MAX_HEIGHT}px` : undefined,
-          overflow: needsExpansion && !isExpanded ? 'hidden' : undefined,
+          overflow: needsExpansion && !isExpanded ? "hidden" : undefined,
         }}
       >
         {children}
